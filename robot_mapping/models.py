@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from .geometry import Pose
+
+ClosureStatus = Literal["proposed", "accepted", "rejected", "withdrawn"]
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+@dataclass(frozen=True)
+class Scan2D:
+    run_id: str
+    index: int
+    timestamp: float
+    sensor_id: str
+    points: tuple[tuple[float, float], ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    scan_id: str = field(default_factory=lambda: new_id("scan"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scan_id": self.scan_id,
+            "run_id": self.run_id,
+            "index": self.index,
+            "timestamp": self.timestamp,
+            "sensor_id": self.sensor_id,
+            "sensor_type": "scan2d",
+            "points": [[x, y] for x, y in self.points],
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Scan2D":
+        return cls(
+            scan_id=data["scan_id"],
+            run_id=data["run_id"],
+            index=int(data["index"]),
+            timestamp=float(data["timestamp"]),
+            sensor_id=data["sensor_id"],
+            points=tuple((float(x), float(y)) for x, y in data["points"]),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+
+@dataclass(frozen=True)
+class PoseRecord:
+    run_id: str
+    index: int
+    timestamp: float
+    pose: Pose
+    source: str = "odometry"
+    pose_id: str = field(default_factory=lambda: new_id("pose"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pose_id": self.pose_id,
+            "run_id": self.run_id,
+            "index": self.index,
+            "timestamp": self.timestamp,
+            "source": self.source,
+            **self.pose.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PoseRecord":
+        return cls(
+            pose_id=data["pose_id"],
+            run_id=data["run_id"],
+            index=int(data["index"]),
+            timestamp=float(data["timestamp"]),
+            source=data.get("source", "odometry"),
+            pose=Pose.from_dict(data),
+        )
+
+
+@dataclass(frozen=True)
+class LoopClosure:
+    closure_id: str
+    run_id: str
+    anchor_index: int
+    repeat_index: int
+    status: ClosureStatus
+    score: float
+    evidence: dict[str, Any]
+    proposed_at: float = field(default_factory=time.time)
+    decided_at: float | None = None
+    reason: str = ""
+
+    def with_status(self, status: ClosureStatus, reason: str = "") -> "LoopClosure":
+        return LoopClosure(
+            self.closure_id,
+            self.run_id,
+            self.anchor_index,
+            self.repeat_index,
+            status,
+            self.score,
+            dict(self.evidence),
+            self.proposed_at,
+            time.time(),
+            reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "closure_id": self.closure_id,
+            "run_id": self.run_id,
+            "anchor_index": self.anchor_index,
+            "repeat_index": self.repeat_index,
+            "status": self.status,
+            "score": self.score,
+            "evidence": self.evidence,
+            "proposed_at": self.proposed_at,
+            "decided_at": self.decided_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "LoopClosure":
+        return cls(
+            closure_id=data["closure_id"],
+            run_id=data["run_id"],
+            anchor_index=int(data["anchor_index"]),
+            repeat_index=int(data["repeat_index"]),
+            status=data["status"],
+            score=float(data["score"]),
+            evidence=dict(data.get("evidence", {})),
+            proposed_at=float(data["proposed_at"]),
+            decided_at=None if data.get("decided_at") is None else float(data["decided_at"]),
+            reason=data.get("reason", ""),
+        )
