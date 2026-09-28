@@ -1,0 +1,453 @@
+{
+  "candidates": [
+    {
+      "candidate_id": "closure-000",
+      "from_node": 0,
+      "to_node": 40,
+      "relative_transform": {
+        "x": 5.839401631229803,
+        "y": 7.486803878878339,
+        "theta": 2.9759840464631395
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 7.021666937153402e-16,
+      "motion_residual": 1.5706209823960187,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-001",
+      "from_node": 1,
+      "to_node": 41,
+      "relative_transform": {
+        "x": 4.881487210386942,
+        "y": 7.550063421053757,
+        "theta": 2.975221001880083
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 8.308148362110449e-16,
+      "motion_residual": 1.4940702037954139,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-002",
+      "from_node": 2,
+      "to_node": 42,
+      "relative_transform": {
+        "x": 3.892058664920337,
+        "y": 7.632220918213239,
+        "theta": 2.9814356587191346
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 1.1057732150366856e-15,
+      "motion_residual": 1.370649715882701,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-003",
+      "from_node": 3,
+      "to_node": 43,
+      "relative_transform": {
+        "x": 2.8688881808419002,
+        "y": 7.722596398805791,
+        "theta": 2.9945148638589103
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 5.617333549722722e-16,
+      "motion_residual": 1.210574032703895,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-004",
+      "from_node": 4,
+      "to_node": 44,
+      "relative_transform": {
+        "x": 1.8118213761800952,
+        "y": 7.809685994204758,
+        "theta": 3.0139582289093454
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 7.595094054341032e-16,
+      "motion_residual": 1.0225635248562326,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-005",
+      "from_node": 5,
+      "to_node": 45,
+      "relative_transform": {
+        "x": 0.7230534755075766,
+        "y": 7.882208091106593,
+        "theta": 3.038907568111533
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 4.1836409184574146e-16,
+      "motion_residual": 0.8124264511864506,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-006",
+      "from_node": 5,
+      "to_node": 46,
+      "relative_transform": {
+        "x": 0.11600924923624607,
+        "y": 7.884326782883981,
+        "theta": 3.0516519083841818
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 4.92338849574739e-16,
+      "motion_residual": 0.7089599688724897,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-007",
+      "from_node": 6,
+      "to_node": 47,
+      "relative_transform": {
+        "x": -1.0177664636214407,
+        "y": 7.916110784563731,
+        "theta": 3.082892131547549
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 9.805224261780596e-16,
+      "motion_residual": 0.46843740867356004,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-008",
+      "from_node": 0,
+      "to_node": 48,
+      "relative_transform": {
+        "x": 1.3700630691107487,
+        "y": 7.625806181228747,
+        "theta": 3.035571570900931
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 5.362886707379033e-16,
+      "motion_residual": 0.821056338488016,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-009",
+      "from_node": 0,
+      "to_node": 49,
+      "relative_transform": {
+        "x": 0.7362672190928482,
+        "y": 7.638750193053454,
+        "theta": 3.051788629127838
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 7.32242375526988e-16,
+      "motion_residual": 0.6889380866683071,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22"
+    },
+    {
+      "candidate_id": "closure-010",
+      "from_node": 0,
+      "to_node": 51,
+      "relative_transform": {
+        "x": 7.641997442789381,
+        "y": 0.011217136963937169,
+        "theta": 1.5110594809769804
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 3.626097700468778e-16,
+      "motion_residual": 11.125360490052989,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 11.13>2.50"
+    },
+    {
+      "candidate_id": "closure-011",
+      "from_node": 1,
+      "to_node": 52,
+      "relative_transform": {
+        "x": 7.158986561349589,
+        "y": 0.599091593939499,
+        "theta": 1.526531650399475
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 3.212940164695817e-16,
+      "motion_residual": 10.382076217070065,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 10.38>2.50"
+    },
+    {
+      "candidate_id": "closure-012",
+      "from_node": 2,
+      "to_node": 53,
+      "relative_transform": {
+        "x": 6.667045935175613,
+        "y": 1.1646817026442904,
+        "theta": 1.5425423334357706
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 0.1785380289595163,
+      "motion_residual": 9.705669969788602,
+      "mean_rmse": 0.1282559797296105,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; motion residual 9.71>2.50"
+    },
+    {
+      "candidate_id": "closure-013",
+      "from_node": 3,
+      "to_node": 54,
+      "relative_transform": {
+        "x": 6.170296057578826,
+        "y": 1.7078862280256413,
+        "theta": 1.5584634260874877
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 0.16969768446236974,
+      "motion_residual": 9.109877556447827,
+      "mean_rmse": 0.11299052524694661,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; motion residual 9.11>2.50"
+    },
+    {
+      "candidate_id": "closure-014",
+      "from_node": 4,
+      "to_node": 55,
+      "relative_transform": {
+        "x": 5.673110143103963,
+        "y": 2.2300974970177747,
+        "theta": 1.573645726750982
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 0.20367066486912397,
+      "motion_residual": 8.608325861375054,
+      "mean_rmse": 0.05681566129290769,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; motion residual 8.61>2.50"
+    },
+    {
+      "candidate_id": "closure-015",
+      "from_node": 5,
+      "to_node": 56,
+      "relative_transform": {
+        "x": 5.179693868871947,
+        "y": 2.733911574057168,
+        "theta": 1.5874562257842362
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 0.1457737973711327,
+      "motion_residual": 8.213651397927705,
+      "mean_rmse": 0.03526578624565685,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; motion residual 8.21>2.50"
+    },
+    {
+      "candidate_id": "closure-016",
+      "from_node": 6,
+      "to_node": 57,
+      "relative_transform": {
+        "x": 4.6937215245497725,
+        "y": 3.222765474419069,
+        "theta": 1.5993141705367382
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 4.657646926676369e-16,
+      "motion_residual": 7.936358686076325,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 7.94>2.50"
+    },
+    {
+      "candidate_id": "closure-017",
+      "from_node": 7,
+      "to_node": 58,
+      "relative_transform": {
+        "x": 4.218041929391836,
+        "y": 3.7005476715560723,
+        "theta": 1.6087240510080427
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 4.657646926676369e-16,
+      "motion_residual": 7.783575961843085,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 7.78>2.50"
+    },
+    {
+      "candidate_id": "closure-018",
+      "from_node": 7,
+      "to_node": 59,
+      "relative_transform": {
+        "x": 3.7682047450708835,
+        "y": 3.658961068261475,
+        "theta": 1.5976278613340833
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 6.734946328680591e-16,
+      "motion_residual": 7.327651824103667,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 7.33>2.50"
+    },
+    {
+      "candidate_id": "closure-019",
+      "from_node": 7,
+      "to_node": 60,
+      "relative_transform": {
+        "x": 3.326268199130564,
+        "y": 3.614373313286035,
+        "theta": 1.5841236341989005
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 5.063396036227355e-16,
+      "motion_residual": 6.900174794457162,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 6.90>2.50"
+    },
+    {
+      "candidate_id": "closure-020",
+      "from_node": 10,
+      "to_node": 61,
+      "relative_transform": {
+        "x": 2.864696434795894,
+        "y": 5.1056474471886295,
+        "theta": 1.6191364938043922
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 8.188600426433446e-16,
+      "motion_residual": 8.076874389504603,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 8.08>2.50"
+    },
+    {
+      "candidate_id": "closure-021",
+      "from_node": 11,
+      "to_node": 62,
+      "relative_transform": {
+        "x": 2.4358659912988334,
+        "y": 5.575163022042885,
+        "theta": 1.6163528551319502
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 6.586907452451086e-16,
+      "motion_residual": 8.405968573868426,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 8.41>2.50"
+    },
+    {
+      "candidate_id": "closure-022",
+      "from_node": 12,
+      "to_node": 63,
+      "relative_transform": {
+        "x": 2.0138678777333294,
+        "y": 6.048836926825216,
+        "theta": 1.6106705892904696
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 6.879800455918813e-16,
+      "motion_residual": 8.834462997876697,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 8.83>2.50"
+    },
+    {
+      "candidate_id": "closure-023",
+      "from_node": 13,
+      "to_node": 64,
+      "relative_transform": {
+        "x": 1.5944041493389884,
+        "y": 6.527627133006357,
+        "theta": 1.602448880399205
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 4.3284461991572713e-16,
+      "motion_residual": 9.351267489200966,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 9.35>2.50"
+    },
+    {
+      "candidate_id": "closure-024",
+      "from_node": 14,
+      "to_node": 65,
+      "relative_transform": {
+        "x": 1.1723177269480805,
+        "y": 7.0116822952975495,
+        "theta": 1.592173468154055
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 4.271113254555058e-16,
+      "motion_residual": 9.945626315319625,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 9.95>2.50"
+    },
+    {
+      "candidate_id": "closure-025",
+      "from_node": 15,
+      "to_node": 66,
+      "relative_transform": {
+        "x": 0.7419054019353937,
+        "y": 7.500379113567685,
+        "theta": 1.5804319280494434
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 1.0706603116298291e-15,
+      "motion_residual": 10.607427389638476,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 10.61>2.50"
+    },
+    {
+      "candidate_id": "closure-026",
+      "from_node": 16,
+      "to_node": 67,
+      "relative_transform": {
+        "x": 0.29730265844663994,
+        "y": 7.992384606121474,
+        "theta": 1.5678834846596388
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 5.509324452557032e-16,
+      "motion_residual": 11.327217214194551,
+      "mean_rmse": null,
+      "accepted": false,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; motion residual 11.33>2.50"
+    },
+    {
+      "candidate_id": "closure-027",
+      "from_node": 0,
+      "to_node": 68,
+      "relative_transform": {
+        "x": 0.06749432125192814,
+        "y": -0.04335421308888082,
+        "theta": 0.011132170756905702
+      },
+      "observation_overlap": 0.5963302752293578,
+      "transform_spread": 0.04166666666666668,
+      "motion_residual": 0.27757019870745003,
+      "mean_rmse": 0.047859524826862364,
+      "accepted": false,
+      "reason": "consistent revisit; withdrawn by operator"
+    }
+  ],
+  "accepted": null
+}

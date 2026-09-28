@@ -1,0 +1,21 @@
+{
+  "candidates": [
+    {
+      "candidate_id": "closure-000",
+      "from_node": 2,
+      "to_node": 26,
+      "relative_transform": {
+        "x": 6.775559606328745,
+        "y": 4.426738545206301,
+        "theta": 3.116739363900175
+      },
+      "observation_overlap": 0.0,
+      "transform_spread": 8.992121150493564e-16,
+      "motion_residual": 0.2011441245882441,
+      "mean_rmse": null,
+      "accepted": true,
+      "reason": "multi-observation overlap 0.00<0.48; match rmse inf>0.22; manually proposed for comparison"
+    }
+  ],
+  "accepted": "closure-000"
+}
