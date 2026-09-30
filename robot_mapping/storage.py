@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .hypothesis import Hypothesis
 from .models import LoopClosure, PoseRecord, Scan2D
 
 
@@ -48,6 +49,17 @@ class ProjectStore:
 
     def record_closure(self, closure: LoopClosure) -> None:
         self.append_event({"type": "loop_closure", "closure": closure.to_dict()})
+
+    def record_hypothesis(self, hypothesis: Hypothesis) -> None:
+        self.append_event({"type": "hypothesis", "hypothesis": hypothesis.to_dict()})
+
+    def load_hypotheses(self) -> list[Hypothesis]:
+        latest: dict[str, Hypothesis] = {}
+        for item in self._read_jsonl(self.events_path):
+            if "hypothesis" in item and item.get("type") == "hypothesis":
+                hypothesis = Hypothesis.from_dict(item["hypothesis"])
+                latest[hypothesis.hypothesis_id] = hypothesis
+        return [latest[key] for key in sorted(latest)]
 
     def append_event(self, event: dict[str, Any]) -> None:
         self._append_jsonl(self.events_path, event)

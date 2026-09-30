@@ -31,6 +31,8 @@ class Scenario:
     expected_anchor: int
     expected_repeat: int
     expected_loop: bool
+    competing_closures: tuple[tuple[int, int], ...] = ()
+    discriminating_index: int = -1
 
 
 def _add_rectangle(walls: list[Segment], x: float, y: float, width: float, height: float) -> None:
@@ -89,6 +91,108 @@ def similar_corridor_scenario() -> Scenario:
     )
     odometry = tuple(_drift_pose(pose, i, 0.25) for i, pose in enumerate(truth))
     return Scenario("similar_corridors", tuple(walls), truth, odometry, 14, 43, False)
+
+
+def _turnaround(end_x: float, y: float, radius: float = 0.7) -> list[Pose]:
+    """Small wiggle that reverses heading inside a straight corridor."""
+    poses = [Pose(end_x, y, 0.0), Pose(end_x, y + radius, 0.0)]
+    steps = 6
+    for step in range(steps + 1):
+        angle = math.pi * step / steps
+        x = end_x - radius * math.sin(angle)
+        yy = y + radius * math.cos(angle)
+        heading = math.pi - angle
+        poses.append(Pose(x, yy, heading))
+    poses.append(Pose(end_x - 2 * radius, y - radius, math.pi))
+    poses.append(Pose(end_x - 2 * radius, y, math.pi))
+    return poses
+
+
+def _east_leg(x_start: float, x_end: float, y: float, step: float = 0.5) -> list[Pose]:
+    return [Pose(x_start + step * k, y, 0.0) for k in range(int(round((x_end - x_start) / step)) + 1)]
+
+
+def _west_leg(x_start: float, x_end: float, y: float, step: float = 0.5) -> list[Pose]:
+    return [Pose(x_start - step * k, y, math.pi) for k in range(int(round((x_start - x_end) / step)) + 1)]
+
+
+def competing_corridors_scenario() -> Scenario:
+    """Two visually identical parallel tubes; only tube A has a side junction opening."""
+    walls: list[Segment] = []
+    end_x = 13.0
+    hall_x = -3.0
+
+    def open_tube(y_low: float, y_high: float) -> None:
+        # Long side walls, east cap solid; west end opens into the hall.
+        walls.append(Segment(hall_x, y_low, end_x, y_low))
+        walls.append(Segment(hall_x, y_high, end_x, y_high))
+        walls.append(Segment(end_x, y_low, end_x, y_high))
+
+    open_tube(-1.5, 1.5)
+    open_tube(-5.5, -2.5)
+    # Hall joining both tubes on the west side (closed west wall).
+    walls.extend(
+        [
+            Segment(hall_x - 1.0, -5.5, hall_x - 1.0, 1.5),
+            Segment(hall_x - 1.0, -5.5, hall_x, -5.5),
+            Segment(hall_x - 1.0, 1.5, hall_x, 1.5),
+            Segment(hall_x, -5.5, hall_x, -2.5),
+            Segment(hall_x, -1.5, hall_x, 1.5),
+        ]
+    )
+    # Side junction alcove on tube A only; opening faces the tube interior.
+    walls.extend(
+        [
+            Segment(5.5, 1.5, 5.5, 4.0),
+            Segment(8.5, 1.5, 8.5, 4.0),
+            Segment(5.5, 4.0, 8.5, 4.0),
+        ]
+    )
+
+    path: list[Pose] = []
+    first_a_start = 0
+    path.extend(_east_leg(0.0, end_x, 0.0))
+    path.extend(_turnaround(end_x, 0.0)[1:])
+    west_after_turn = end_x - 1.4
+    path.extend(_west_leg(west_after_turn, hall_x, 0.0)[1:])
+    # Transfer through hall to tube B.
+    for k in range(1, 9):
+        path.append(Pose(hall_x, -0.5 * k, -math.pi / 2))
+    path.extend(_east_leg(hall_x + 0.5, end_x, -4.0))
+    path.extend(_turnaround(end_x, -4.0)[1:])
+    path.extend(_west_leg(west_after_turn, hall_x, -4.0)[1:])
+    # Transfer back through hall.
+    for k in range(1, 9):
+        path.append(Pose(hall_x, -4.0 + 0.5 * k, math.pi / 2))
+    second_a_start = len(path)
+    path.extend(_east_leg(hall_x + 0.5, end_x, 0.0))
+
+    truth = tuple(path)
+    odometry = tuple(_drift_pose(pose, i, 0.18) for i, pose in enumerate(truth))
+
+    def find_index(x: float, y: float, start_at: int = 0) -> int:
+        for index in range(start_at, len(truth)):
+            pose = truth[index]
+            if abs(pose.x - x) < 0.26 and abs(pose.y - y) < 0.26 and abs(pose.theta) < 0.01:
+                return index
+        raise ValueError("pose not found")
+
+    repeat_x = 3.0
+    h1_anchor = first_a_start + int(round(repeat_x / 0.5))
+    h2_anchor = find_index(repeat_x, -4.0, first_a_start)
+    repeat = find_index(repeat_x, 0.0, second_a_start)
+    discriminating = find_index(7.0, 0.0, second_a_start)
+    return Scenario(
+        "competing_corridors",
+        tuple(walls),
+        truth,
+        odometry,
+        h1_anchor,
+        repeat,
+        True,
+        ((h1_anchor, repeat), (h2_anchor, repeat)),
+        discriminating,
+    )
 
 
 def ray_intersection(pose: Pose, angle: float, walls: tuple[Segment, ...], max_range: float = 8.0) -> float | None:

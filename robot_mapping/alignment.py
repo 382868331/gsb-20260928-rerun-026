@@ -18,6 +18,20 @@ def nearest_error(point: tuple[float, float], targets: list[tuple[float, float]]
     return math.sqrt(min(squared_distance(point, target) for target in targets))
 
 
+def symmetric_point_error(
+    source: list[tuple[float, float]],
+    target: list[tuple[float, float]],
+    transform: Pose,
+    far_range: float = 6.0,
+) -> float:
+    """Median Chamfer error that ignores unmatched far/max-range returns (open junctions)."""
+    mapped = [transform_point(point, transform) for point in source]
+    forward = [nearest_error(point, target) for point in mapped if math.hypot(point[0], point[1]) < far_range]
+    backward = [nearest_error(point, mapped) for point in target if math.hypot(point[0], point[1]) < far_range]
+    errors = forward + backward
+    return median(errors) if errors else math.inf
+
+
 def align_icp(
     source: list[tuple[float, float]],
     target: list[tuple[float, float]],

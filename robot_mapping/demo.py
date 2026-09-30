@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from .mapper import MappingPlatform
-from .simulator import Scenario, similar_corridor_scenario, simulate_scan, true_loop_scenario
+from .simulator import Scenario, competing_corridors_scenario, similar_corridor_scenario, simulate_scan, true_loop_scenario
 
 
 def load_scenario_data(platform: MappingPlatform, run_id: str, scenario: Scenario) -> None:
@@ -50,6 +50,7 @@ def run_demo(project_dir: str | Path) -> Path:
             "observations": len(scenario.truth),
             "evidence": proposal.evidence,
         })
+    competing_summary = _run_competing_demo(platform)
     report = project / "DEMO_REPORT.md"
     lines = [
         "# 机器人二维建图闭环演示",
@@ -66,6 +67,16 @@ def run_demo(project_dir: str | Path) -> Path:
         )
     lines.extend([
         "",
+        "## 竞争假设：两条相似走廊",
+        "",
+        f"- 真走廊假设 `{competing_summary['true_hypothesis']}` 在后续观测中持续获得支持，保持开放。",
+        f"- 孪生走廊假设 `{competing_summary['false_hypothesis']}` 被后续观测排除：{competing_summary['exclusion_reason']}",
+        f"- 排除前的试用地图 `{competing_summary['false_trial_map']}` 仍可与 `{competing_summary['true_trial_map']}` 比较。",
+        "- 重开错误假设再次喂入观测仍被排除；最终选定真走廊假设，仅局部修正受影响轨迹。",
+        f"- 选定地图 `{competing_summary['selected_map']}`；撤回后公共地图回到原始轨迹。",
+    ])
+    lines.extend([
+        "",
         "## 判定依据",
         "",
         "- 先用范围形状粗筛，但相似走廊不会仅凭单帧形状闭环。",
@@ -79,3 +90,31 @@ def run_demo(project_dir: str | Path) -> Path:
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     (project / "demo_summary.json").write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
+
+
+def _run_competing_demo(platform: MappingPlatform) -> dict[str, str]:
+    run_id = "competing_corridors"
+    scenario = competing_corridors_scenario()
+    load_scenario_data(platform, run_id, scenario)
+    (true_pair, false_pair) = scenario.competing_closures
+    true_closure = platform.propose_candidate(run_id, *true_pair)
+    false_closure = platform.propose_candidate(run_id, *false_pair)
+    true_hypothesis = platform.create_hypothesis(run_id, [true_closure.closure_id], "same_corridor")
+    false_hypothesis = platform.create_hypothesis(run_id, [false_closure.closure_id], "twin_corridor")
+    true_trial = platform.build_trial_map(true_hypothesis.hypothesis_id)
+    false_trial = platform.build_trial_map(false_hypothesis.hypothesis_id)
+    platform.advance_observations(run_id)
+    assert true_hypothesis.status == "open"
+    assert false_hypothesis.status == "excluded"
+    platform.reopen_hypothesis(false_hypothesis.hypothesis_id, "compare both corridor explanations again")
+    platform.advance_observations(run_id)
+    assert false_hypothesis.status == "excluded"
+    selected = platform.select_hypothesis(true_hypothesis.hypothesis_id)
+    return {
+        "true_hypothesis": true_hypothesis.hypothesis_id,
+        "false_hypothesis": false_hypothesis.hypothesis_id,
+        "true_trial_map": true_trial["map_version_id"],
+        "false_trial_map": false_trial["map_version_id"],
+        "exclusion_reason": false_hypothesis.excluded_reason,
+        "selected_map": selected["map_version_id"],
+    }
