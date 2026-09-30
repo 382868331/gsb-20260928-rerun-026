@@ -8,6 +8,7 @@ from typing import Any, Literal
 from .geometry import Pose
 
 ClosureStatus = Literal["proposed", "accepted", "rejected", "withdrawn"]
+HypothesisStatus = Literal["active", "eliminated", "confirmed"]
 
 
 def new_id(prefix: str) -> str:
@@ -132,6 +133,79 @@ class LoopClosure:
             score=float(data["score"]),
             evidence=dict(data.get("evidence", {})),
             proposed_at=float(data["proposed_at"]),
+            decided_at=None if data.get("decided_at") is None else float(data["decided_at"]),
+            reason=data.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
+class Hypothesis:
+    """An independent map explanation built from a mutually compatible set of loop closures.
+
+    The closure set is empty for the "distinct places" explanation that assumes none of
+    the competing closures is real. A hypothesis keeps accumulating evidence without
+    rewriting the common map until it is confirmed.
+    """
+
+    hypothesis_id: str
+    run_id: str
+    name: str
+    closure_ids: tuple[str, ...]
+    status: HypothesisStatus
+    evidence: tuple[dict[str, Any], ...] = ()
+    created_at: float = field(default_factory=time.time)
+    decided_at: float | None = None
+    reason: str = ""
+
+    def with_status(self, status: HypothesisStatus, reason: str = "") -> "Hypothesis":
+        return Hypothesis(
+            self.hypothesis_id,
+            self.run_id,
+            self.name,
+            self.closure_ids,
+            status,
+            self.evidence,
+            self.created_at,
+            time.time(),
+            reason,
+        )
+
+    def with_evidence(self, evidence: tuple[dict[str, Any], ...], reason: str = "") -> "Hypothesis":
+        return Hypothesis(
+            self.hypothesis_id,
+            self.run_id,
+            self.name,
+            self.closure_ids,
+            self.status,
+            evidence,
+            self.created_at,
+            self.decided_at,
+            reason or self.reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "hypothesis_id": self.hypothesis_id,
+            "run_id": self.run_id,
+            "name": self.name,
+            "closure_ids": list(self.closure_ids),
+            "status": self.status,
+            "evidence": list(self.evidence),
+            "created_at": self.created_at,
+            "decided_at": self.decided_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Hypothesis":
+        return cls(
+            hypothesis_id=data["hypothesis_id"],
+            run_id=data["run_id"],
+            name=data["name"],
+            closure_ids=tuple(data.get("closure_ids", [])),
+            status=data["status"],
+            evidence=tuple(data.get("evidence", [])),
+            created_at=float(data["created_at"]),
             decided_at=None if data.get("decided_at") is None else float(data["decided_at"]),
             reason=data.get("reason", ""),
         )
