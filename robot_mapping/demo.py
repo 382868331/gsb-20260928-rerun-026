@@ -45,26 +45,94 @@ def run_competing_corridor_demo(platform: MappingPlatform, run_id: str, scenario
     trial_accepted = platform.hypotheses_for(run_id)
     assert all(h.status == "active" for h in trial_accepted), "trial hypotheses must stay undecided"
 
+    # Group the follow-up probes *before* collecting anything. One target lands on
+    # a featureless corridor stretch (cannot promise exclusion), another reaches
+    # beyond the observed map (information insufficient); neither is evidence yet.
+    probe_plan = platform.create_probe_plan(
+        run_id,
+        "junction after the second similar corridor",
+        [arrival + 2, arrival + 40],
+        "compare observing a plain stretch vs. a position beyond the mapped corridor",
+    )
+    comparison = platform.compare_probe_plan(probe_plan.plan_id)
+    prediction_labels = {
+        (item["planned_index"], item["hypothesis_id"]): item["prediction"]
+        for target in comparison["targets"]
+        for item in target["predictions"]
+    }
+    assert any(label == "indistinguishable" for label in prediction_labels.values())
+    assert any(label == "insufficient_information" for label in prediction_labels.values())
+    # planned probes must not contribute evidence or change hypothesis status
+    assert all(len(item.evidence) == 0 for item in platform.hypotheses_for(run_id))
+
     eliminating_observation = None
+    expected_vs_actual_notes: list[str] = []
     for index in range(arrival + 1, len(scenario.truth)):
         _load_one(platform, run_id, scenario, index)
-        updated = platform.feed_observation_to_hypotheses(run_id, index)
-        for hypothesis in updated:
-            if hypothesis.status == "eliminated" and eliminating_observation is None:
-                eliminating_observation = index
+        linked_plan = probe_plan.plan_id if index in probe_plan.target_indices else None
+        result = platform.feed_observation_to_hypotheses(
+            run_id,
+            index,
+            plan_id=linked_plan,
+            source_position=(scenario.truth[index].x, scenario.truth[index].y),
+            collected_at=float(index),
+        )
+        expected_vs_actual_notes.extend(
+            item["expected_vs_actual"] for item in result["hypothesis_results"] if item["expected_vs_actual"]
+        )
+        if eliminating_observation is None and any(item["eliminated"] for item in result["hypothesis_results"]):
+            eliminating_observation = index
     assert eliminating_observation is not None, "later connectivity evidence must eliminate the fold"
+    assert any("unlike the plan" in note for note in expected_vs_actual_notes), "plan vs. reality difference must be reported"
+
+    # The first junction view is discovered to belong to another corridor: withdraw
+    # it and check the affected plan/hypothesis is restored while other evidence stays.
+    withdrawn = platform.withdraw_observation(
+        run_id, arrival + 1, "junction scan later attributed to the other corridor", reassigned_corridor=True
+    )
+    fold = platform.hypothesis(fold.hypothesis_id)
+    assert fold.hypothesis_id in withdrawn["restored_hypotheses"]
+    assert any(item.get("status") == "reassigned" for item in fold.evidence)
+    assert any(item.get("status") == "valid" and not item["supports_fold"] for item in fold.evidence), (
+        "independent evidence from other observations must keep counting"
+    )
+    restored_map = platform.build_map(run_id, "03_fold_restored_after_withdrawal", hypothesis_id=fold.hypothesis_id)
+
+    # A branch-scoped plan advances probing inside the reopened fold branch and
+    # predicts the distinctive notch position. Its execution eliminates the fold
+    # again: the plan said the position would exclude on conflict, and it does.
+    branch_plan = platform.create_probe_plan(
+        run_id,
+        "fold branch: distinctive notch anchor",
+        [arrival + 11],
+        "probe the distinctive anchor predicted by the fold",
+        branch_hypothesis_id=fold.hypothesis_id,
+    )
+    branch_target = platform.compare_probe_plan(branch_plan.plan_id)["targets"][0]["predictions"]
+    assert any(item["prediction"] == "would_exclude_on_conflict" for item in branch_target)
+    branch_result = platform.feed_observation_to_hypotheses(
+        run_id,
+        arrival + 11,
+        plan_id=branch_plan.plan_id,
+        source_position=(scenario.truth[arrival + 11].x, scenario.truth[arrival + 11].y),
+        collected_at=float(arrival + 11),
+    )
+    assert any(item["eliminated"] and "matched the plan" in item["expected_vs_actual"] for item in branch_result["hypothesis_results"])
+
     fold = platform.hypothesis(fold.hypothesis_id)
     distinct = platform.hypothesis(distinct.hypothesis_id)
     elimination_reason_text = fold.reason
-    eliminated_map = platform.build_map(run_id, "03_fold_eliminated_distinct_corridors", hypothesis_id=distinct.hypothesis_id)
+    eliminated_map = platform.build_map(run_id, "04_fold_eliminated_distinct_corridors", hypothesis_id=distinct.hypothesis_id)
+    # the never-executed far-away plan item must never have become evidence
+    assert all(int(item["repeat_index"]) != arrival + 40 for item in fold.evidence)
 
     reopened = platform.reopen_hypothesis(fold.hypothesis_id)
-    reopened_map = platform.build_map(run_id, "04_reopened_fold_for_comparison", hypothesis_id=reopened.hypothesis_id)
+    reopened_map = platform.build_map(run_id, "05_reopened_fold_for_comparison", hypothesis_id=reopened.hypothesis_id)
     assert {item["repeat_index"] for item in reopened.evidence if not item["supports_fold"]}, "exclusion evidence must remain reviewable"
     fold = platform.eliminate_hypothesis(fold.hypothesis_id, "re-checked against retained evidence; notch connectivity still contradicts the fold")
     platform.reject_closure(next(iter(fold.closure_ids)), fold.reason)
     confirmed = platform.confirm_hypothesis(distinct.hypothesis_id, "connectivity landmarks show two distinct corridors")
-    final_map = platform.build_map(run_id, "05_final_distinct_corridors")
+    final_map = platform.build_map(run_id, "06_final_distinct_corridors")
     return {
         "run_id": run_id,
         "decision": "fold hypothesis eliminated after later observations; distinct-corridor map selected",
@@ -76,7 +144,11 @@ def run_competing_corridor_demo(platform: MappingPlatform, run_id: str, scenario
         "fold_preview": fold_preview["map_version_id"],
         "eliminated_map": eliminated_map["map_version_id"],
         "reopened_map": reopened_map["map_version_id"],
+        "restored_map": restored_map["map_version_id"],
         "final_map": final_map["map_version_id"],
+        "probe_plan": probe_plan.plan_id,
+        "branch_plan": branch_plan.plan_id,
+        "expected_vs_actual": expected_vs_actual_notes,
         "evidence": [item for item in fold.evidence],
         "observations": len(scenario.truth),
     }

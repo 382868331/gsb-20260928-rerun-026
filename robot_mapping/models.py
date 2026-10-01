@@ -209,3 +209,63 @@ class Hypothesis:
             decided_at=None if data.get("decided_at") is None else float(data["decided_at"]),
             reason=data.get("reason", ""),
         )
+
+
+@dataclass(frozen=True)
+class ProbePlan:
+    """A group of follow-up observations the user *plans* to collect.
+
+    Plans are prospective: their predicted exclusion power is frozen when they
+    are created and they never add evidence to a hypothesis until an actual
+    observation arrives and is linked back to a plan item.
+    """
+
+    plan_id: str
+    run_id: str
+    ambiguous_region: str
+    target_indices: tuple[int, ...]
+    predictions: tuple[dict[str, Any], ...]
+    executions: tuple[dict[str, Any], ...] = ()
+    branch_hypothesis_id: str | None = None
+    created_at: float = field(default_factory=time.time)
+    reason: str = ""
+
+    def with_executions(self, executions: tuple[dict[str, Any], ...]) -> "ProbePlan":
+        return ProbePlan(
+            self.plan_id,
+            self.run_id,
+            self.ambiguous_region,
+            self.target_indices,
+            self.predictions,
+            executions,
+            self.branch_hypothesis_id,
+            self.created_at,
+            self.reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "run_id": self.run_id,
+            "ambiguous_region": self.ambiguous_region,
+            "target_indices": list(self.target_indices),
+            "predictions": list(self.predictions),
+            "executions": list(self.executions),
+            "branch_hypothesis_id": self.branch_hypothesis_id,
+            "created_at": self.created_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProbePlan":
+        return cls(
+            plan_id=data["plan_id"],
+            run_id=data["run_id"],
+            ambiguous_region=data["ambiguous_region"],
+            target_indices=tuple(data.get("target_indices", [])),
+            predictions=tuple(data.get("predictions", [])),
+            executions=tuple(data.get("executions", [])),
+            branch_hypothesis_id=data.get("branch_hypothesis_id"),
+            created_at=float(data["created_at"]),
+            reason=data.get("reason", ""),
+        )

@@ -6,8 +6,13 @@ from .alignment import range_signature, signature_distance
 from .closure import check_loop_candidate, make_proposal
 from .geometry import Pose
 from .graph import PoseEdge, optimize_poses, relative_pose
-from .hypotheses import closures_conflict, elimination_reason, evaluate_observation
-from .models import Hypothesis, LoopClosure, PoseRecord, Scan2D, new_id
+from .hypotheses import closures_conflict, elimination_reason
+from .plans import (
+    classify_observation,
+    expected_vs_actual,
+    predict_probe,
+)
+from .models import Hypothesis, LoopClosure, PoseRecord, ProbePlan, Scan2D, new_id
 from .occupancy import OccupancyGrid
 from .storage import ProjectStore
 
@@ -19,6 +24,7 @@ class MappingRun:
     odometry: list[PoseRecord]
     closures: list[LoopClosure]
     hypotheses: list[Hypothesis]
+    probe_plans: list[ProbePlan]
 
 
 class MappingPlatform:
@@ -29,14 +35,14 @@ class MappingPlatform:
 
     def create_run(self, run_id: str) -> MappingRun:
         self.store.run_dir(run_id)
-        run = MappingRun(run_id, [], [], [], [])
+        run = MappingRun(run_id, [], [], [], [], [])
         self.runs[run_id] = run
         self._loaded.add(run_id)
         self.store.append_event({"type": "run_created", "run_id": run_id})
         return run
 
     def add_observation(self, run_id: str, pose: Pose, points: list[tuple[float, float]], sensor_id: str = "lidar_2d") -> None:
-        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], []))
+        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], []))
         self._loaded.add(run_id)
         index = len(run.scans)
         timestamp = float(index)
@@ -119,32 +125,321 @@ class MappingPlatform:
         hypotheses.append(null)
         return hypotheses
 
-    def feed_observation_to_hypotheses(self, run_id: str, repeat_index: int) -> list[Hypothesis]:
-        """Evaluate one later observation against every active fold explanation.
+    def create_probe_plan(
+        self,
+        run_id: str,
+        ambiguous_region: str,
+        target_indices: list[int],
+        reason: str = "",
+        branch_hypothesis_id: str | None = None,
+    ) -> ProbePlan:
+        """Group prospective follow-up probes and freeze what each *could* exclude.
 
-        Evidence is retained on the hypothesis even after elimination so the decision can
-        be reviewed and the hypothesis can be reopened.
+        Only observations already on disk are used; planned scans are never read
+        and the common map and hypothesis evidence are left untouched.
         """
 
         run = self._run(run_id)
+        hypotheses = self._branch_hypotheses(run, branch_hypothesis_id)
+        closures = {closure.closure_id: closure for closure in run.closures}
+        predictions = tuple(
+            prediction
+            for target_index in target_indices
+            for hypothesis in hypotheses
+            for prediction in (predict_probe(run.scans, hypothesis, closures, target_index),)
+        )
+        plan = ProbePlan(
+            plan_id=new_id("plan"),
+            run_id=run_id,
+            ambiguous_region=ambiguous_region,
+            target_indices=tuple(target_indices),
+            predictions=predictions,
+            branch_hypothesis_id=branch_hypothesis_id,
+            reason=reason,
+        )
+        run.probe_plans.append(plan)
+        self.store.record_probe_plan(plan)
+        self.store.append_event(
+            {
+                "type": "probe_plan_created",
+                "run_id": run_id,
+                "plan_id": plan.plan_id,
+                "ambiguous_region": ambiguous_region,
+                "target_indices": list(plan.target_indices),
+                "branch_hypothesis_id": branch_hypothesis_id,
+            }
+        )
+        return plan
+
+    @staticmethod
+    def _branch_hypotheses(run: MappingRun, branch_hypothesis_id: str | None) -> list[Hypothesis]:
+        if branch_hypothesis_id is None:
+            return list(run.hypotheses)
+        hypothesis = next(item for item in run.hypotheses if item.hypothesis_id == branch_hypothesis_id)
+        null = next((item for item in run.hypotheses if not item.closure_ids), None)
+        return [hypothesis] + ([null] if null is not None else [])
+
+    def compare_probe_plan(self, plan_id: str) -> dict[str, object]:
+        """Compare, per target position, which hypotheses a probe would rule out.
+
+        ``would_exclude`` means the fold survives an agreeing view but is excluded
+        by a conflicting one. Positions stay in the insufficient-information or
+        indistinguishable buckets so planned observations are not promised power
+        they do not have.
+        """
+
+        plan = self.probe_plan(plan_id)
+        by_target: dict[int, list[dict[str, object]]] = {}
+        for prediction in plan.predictions:
+            by_target.setdefault(int(prediction["planned_index"]), []).append(dict(prediction))
+        return {
+            "plan_id": plan_id,
+            "ambiguous_region": plan.ambiguous_region,
+            "executed": [item["actual_index"] for item in plan.executions],
+            "targets": [
+                {
+                    "planned_index": target_index,
+                    "predictions": by_target.get(target_index, []),
+                }
+                for target_index in plan.target_indices
+            ],
+        }
+
+    def feed_observation_to_hypotheses(
+        self,
+        run_id: str,
+        repeat_index: int,
+        plan_id: str | None = None,
+        source_position: tuple[float, float] | None = None,
+        collected_at: float | None = None,
+    ) -> dict[str, object]:
+        """Apply one *actually collected* observation using its source and timestamp.
+
+        Inconclusive views are retained as such rather than forced into a vote.
+        When the observation matches a plan item, the result is compared against
+        the frozen plan prediction and the difference is recorded on the plan.
+        """
+
+        run = self._run(run_id)
+        timestamp = run.scans[repeat_index].timestamp if repeat_index < len(run.scans) else float(repeat_index)
+        if collected_at is not None:
+            timestamp = collected_at
         updated: list[Hypothesis] = []
+        per_hypothesis: dict[str, dict[str, object]] = {}
+        plan = self.probe_plan(plan_id) if plan_id is not None else None
+        scoped = {hypothesis.hypothesis_id for hypothesis in self._branch_hypotheses(run, plan.branch_hypothesis_id)} if plan is not None else None
         for hypothesis in list(run.hypotheses):
-            if hypothesis.status != "active" or not hypothesis.closure_ids:
+            if scoped is not None and hypothesis.hypothesis_id not in scoped:
+                continue
+            if not hypothesis.closure_ids:
+                continue
+            if scoped is None and hypothesis.status != "active":
+                continue
+            if hypothesis.status == "confirmed":
                 continue
             closure_id = next(iter(hypothesis.closure_ids))
             closure = next(item for item in run.closures if item.closure_id == closure_id)
-            observation = evaluate_observation(run.scans, closure, repeat_index)
-            if observation is None:
+            outcome = classify_observation(run.scans, closure, repeat_index)
+            if outcome is None:
                 continue
-            evidence = hypothesis.evidence + (observation.to_dict(),)
-            enriched = hypothesis.with_evidence(evidence)
+            record = outcome.to_dict()
+            record.update(
+                {
+                    "status": "valid",
+                    "source_x": None if source_position is None else float(source_position[0]),
+                    "source_y": None if source_position is None else float(source_position[1]),
+                    "collected_at": timestamp,
+                    "plan_id": plan_id,
+                }
+            )
+            enriched = hypothesis.with_evidence(hypothesis.evidence + (record,))
             reason = elimination_reason(enriched.evidence)
+            eliminated = bool(reason)
             if reason:
                 enriched = enriched.with_status("eliminated", reason)
             run.hypotheses = [enriched if item.hypothesis_id == enriched.hypothesis_id else item for item in run.hypotheses]
             self.store.record_hypothesis(enriched)
             updated.append(enriched)
-        return updated
+            prediction = None
+            if plan is not None:
+                prediction = next(
+                    (
+                        item
+                        for item in plan.predictions
+                        if item["hypothesis_id"] == hypothesis.hypothesis_id
+                        and int(item["planned_index"]) == repeat_index
+                    ),
+                    None,
+                )
+            prediction_label = None if prediction is None else prediction["prediction"]
+            per_hypothesis[hypothesis.hypothesis_id] = {
+                "hypothesis_id": hypothesis.hypothesis_id,
+                "verdict": outcome.verdict,
+                "eliminated": eliminated,
+                "plan_prediction": prediction_label,
+                "expected_vs_actual": None
+                if prediction_label is None
+                else expected_vs_actual(prediction_label, outcome.verdict, eliminated),
+            }
+        if plan is not None:
+            self._record_execution(plan, repeat_index, timestamp, source_position, per_hypothesis)
+        return {
+            "run_id": run_id,
+            "actual_index": repeat_index,
+            "collected_at": timestamp,
+            "plan_id": plan_id,
+            "hypothesis_results": list(per_hypothesis.values()),
+            "updated_hypotheses": updated,
+        }
+
+    def _record_execution(
+        self,
+        plan: ProbePlan,
+        actual_index: int,
+        timestamp: float,
+        source_position: tuple[float, float] | None,
+        per_hypothesis: dict[str, dict[str, object]],
+    ) -> None:
+        run = self._run(plan.run_id)
+        execution = {
+            "actual_index": actual_index,
+            "collected_at": timestamp,
+            "source_x": None if source_position is None else float(source_position[0]),
+            "source_y": None if source_position is None else float(source_position[1]),
+            "status": "valid",
+            "results": list(per_hypothesis.values()),
+        }
+        prior = [item for item in plan.executions if item["actual_index"] != actual_index]
+        updated_plan = plan.with_executions(tuple(prior + [execution]))
+        run.probe_plans = [updated_plan if item.plan_id == plan.plan_id else item for item in run.probe_plans]
+        self.store.record_probe_plan(updated_plan)
+        self.store.append_event(
+            {
+                "type": "probe_executed",
+                "run_id": plan.run_id,
+                "plan_id": plan.plan_id,
+                "actual_index": actual_index,
+                "collected_at": timestamp,
+            }
+        )
+
+    def withdraw_observation(
+        self,
+        run_id: str,
+        repeat_index: int,
+        reason: str = "observation withdrawn",
+        reassigned_corridor: bool = False,
+    ) -> dict[str, object]:
+        """Invalidate one observation's evidence without touching raw scans.
+
+        Independent evidence from other observations stays valid. Hypotheses whose
+        exclusion depended on the withdrawn evidence are restored to ``active``;
+        plans mark the matching execution withdrawn so the plan history explains
+        the reversal.
+        """
+
+        run = self._run(run_id)
+        restored: list[str] = []
+        for hypothesis in list(run.hypotheses):
+            if not hypothesis.evidence:
+                continue
+            changed = False
+            evidence = []
+            for item in hypothesis.evidence:
+                if int(item["repeat_index"]) == repeat_index and item.get("status", "valid") == "valid":
+                    updated_item = dict(item)
+                    updated_item["status"] = "reassigned" if reassigned_corridor else "withdrawn"
+                    updated_item["withdrawal_reason"] = reason
+                    evidence.append(updated_item)
+                    changed = True
+                else:
+                    evidence.append(item)
+            if not changed:
+                continue
+            replacement = hypothesis.with_evidence(tuple(evidence))
+            if hypothesis.status == "eliminated" and not elimination_reason(replacement.evidence):
+                replacement = replacement.with_status(
+                    "active",
+                    f"restored: observation {repeat_index} withdrawn ({reason}); remaining evidence insufficient for exclusion",
+                )
+                restored.append(hypothesis.hypothesis_id)
+            run.hypotheses = [replacement if item.hypothesis_id == hypothesis.hypothesis_id else item for item in run.hypotheses]
+            self.store.record_hypothesis(replacement)
+            self.store.append_event(
+                {
+                    "type": "observation_withdrawn",
+                    "run_id": run_id,
+                    "repeat_index": repeat_index,
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "reassigned_corridor": reassigned_corridor,
+                    "restored": hypothesis.hypothesis_id in restored,
+                    "reason": reason,
+                }
+            )
+        for plan in list(run.probe_plans):
+            changed_executions = []
+            for execution in plan.executions:
+                if int(execution["actual_index"]) == repeat_index and execution.get("status", "valid") == "valid":
+                    updated_execution = dict(execution)
+                    updated_execution["status"] = "reassigned" if reassigned_corridor else "withdrawn"
+                    updated_execution["withdrawal_reason"] = reason
+                    changed_executions.append(updated_execution)
+                else:
+                    changed_executions.append(execution)
+            if changed_executions != list(plan.executions):
+                updated_plan = plan.with_executions(tuple(changed_executions))
+                run.probe_plans = [updated_plan if item.plan_id == plan.plan_id else item for item in run.probe_plans]
+                self.store.record_probe_plan(updated_plan)
+        return {"run_id": run_id, "withdrawn_index": repeat_index, "restored_hypotheses": restored}
+
+    def probe_plan(self, plan_id: str) -> ProbePlan:
+        for run in self.runs.values():
+            for plan in run.probe_plans:
+                if plan.plan_id == plan_id:
+                    return plan
+        raise KeyError(f"unknown probe plan: {plan_id}")
+
+    def probe_plans_for(self, run_id: str) -> list[ProbePlan]:
+        return list(self._run(run_id).probe_plans)
+
+    def decision_trace(self, run_id: str) -> dict[str, object]:
+        """Replay plans, actual probes, exclusions, withdrawals and the final pick."""
+
+        run = self._run(run_id)
+        return {
+            "run_id": run_id,
+            "plans": [
+                {
+                    "plan_id": plan.plan_id,
+                    "ambiguous_region": plan.ambiguous_region,
+                    "branch_hypothesis_id": plan.branch_hypothesis_id,
+                    "target_indices": list(plan.target_indices),
+                    "predictions": list(plan.predictions),
+                    "executions": list(plan.executions),
+                }
+                for plan in run.probe_plans
+            ],
+            "hypotheses": [
+                {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "name": hypothesis.name,
+                    "status": hypothesis.status,
+                    "reason": hypothesis.reason,
+                    "evidence": list(hypothesis.evidence),
+                }
+                for hypothesis in run.hypotheses
+            ],
+            "closures": [
+                {
+                    "closure_id": closure.closure_id,
+                    "anchor_index": closure.anchor_index,
+                    "repeat_index": closure.repeat_index,
+                    "status": closure.status,
+                    "reason": closure.reason,
+                }
+                for closure in run.closures
+            ],
+        }
 
     def hypothesis(self, hypothesis_id: str) -> Hypothesis:
         for run in self.runs.values():
@@ -330,6 +625,7 @@ class MappingPlatform:
             poses = self.store.load_poses(run_id)
             closures = [c for c in self.store.load_closures() if c.run_id == run_id]
             hypotheses = [h for h in self.store.load_hypotheses() if h.run_id == run_id]
-            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses)
+            plans = [p for p in self.store.load_probe_plans() if p.run_id == run_id]
+            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans)
             self._loaded.add(run_id)
         return self.runs[run_id]
