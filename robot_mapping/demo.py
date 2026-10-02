@@ -131,8 +131,50 @@ def run_competing_corridor_demo(platform: MappingPlatform, run_id: str, scenario
     assert {item["repeat_index"] for item in reopened.evidence if not item["supports_fold"]}, "exclusion evidence must remain reviewable"
     fold = platform.eliminate_hypothesis(fold.hypothesis_id, "re-checked against retained evidence; notch connectivity still contradicts the fold")
     platform.reject_closure(next(iter(fold.closure_ids)), fold.reason)
+
+    # A later calibration revision explains the same raw observations 46/47 as
+    # readings from the neighboring corridor (effective positions 34/35). No new
+    # scan is created; old vs new calibration are compared as hypothesis branches.
+    calibration = platform.register_calibration(
+        run_id,
+        "adjacent-corridor recalibration",
+        "later probe calibration moves two readings onto the neighboring corridor",
+    )
+    for raw_index, interpreted_index in ((46, 34), (47, 35)):
+        platform.reinterpret_observation(
+            calibration.calibration_id,
+            raw_index,
+            interpreted_index,
+            note="reinterpreted under the later calibration; raw observation unchanged",
+        )
+    branch_comparison = platform.compare_calibration_branches(calibration.calibration_id)
+    fold_branch = next(item for item in branch_comparison["hypotheses"] if item["hypothesis_id"] == fold.hypothesis_id)
+    assert fold_branch["closure_judgment_changed"], "moving the readings to the adjacent corridor must change the fold judgment"
+    new_calibration_preview = platform.build_map(
+        run_id,
+        "06a_new_calibration_branch_preview",
+        hypothesis_id=fold.hypothesis_id,
+        calibration_id=calibration.calibration_id,
+    )
+    # partial confirmation: only raw observation 46 is accepted at first
+    platform.confirm_calibration_interpretation(
+        calibration.calibration_id, [46], "only the first repositioning is independently checked"
+    )
+    partial_scope_map = platform.build_map(
+        run_id,
+        "06b_partial_confirmation_scope",
+        hypothesis_id=fold.hypothesis_id,
+        calibration_id=calibration.calibration_id,
+    )
+    assert partial_scope_map["calibration_scope"]["confirmed_raw_indices"] == [46]
+    # the revision is later recalled: the old-calibration elimination is restored,
+    # while independent evidence and already-built map versions remain available
+    withdrawal = platform.withdraw_calibration(calibration.calibration_id, "recalibration later recalled")
+    restored_fold = platform.hypothesis(fold.hypothesis_id)
+    assert restored_fold.status == "eliminated"
+    assert any(item.get("status", "valid") == "valid" and not item.get("calibration_id") for item in restored_fold.evidence)
     confirmed = platform.confirm_hypothesis(distinct.hypothesis_id, "connectivity landmarks show two distinct corridors")
-    final_map = platform.build_map(run_id, "06_final_distinct_corridors")
+    final_map = platform.build_map(run_id, "07_final_distinct_corridors")
     return {
         "run_id": run_id,
         "decision": "fold hypothesis eliminated after later observations; distinct-corridor map selected",
@@ -145,6 +187,10 @@ def run_competing_corridor_demo(platform: MappingPlatform, run_id: str, scenario
         "eliminated_map": eliminated_map["map_version_id"],
         "reopened_map": reopened_map["map_version_id"],
         "restored_map": restored_map["map_version_id"],
+        "calibration_id": calibration.calibration_id,
+        "new_calibration_preview": new_calibration_preview["map_version_id"],
+        "partial_scope_map": partial_scope_map["map_version_id"],
+        "calibration_restored_hypotheses": withdrawal["restored_hypotheses"],
         "final_map": final_map["map_version_id"],
         "probe_plan": probe_plan.plan_id,
         "branch_plan": branch_plan.plan_id,

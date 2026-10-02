@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from .alignment import range_signature, signature_distance
+from .calibration import (
+    CALIBRATION_WITHDRAWN,
+    CONFIRMED,
+    PROPOSED,
+    baseline_evidence,
+    branch_verdict,
+    calibrated_evidence,
+    compare_branches,
+    scoped_evidence,
+)
 from .closure import check_loop_candidate, make_proposal
 from .geometry import Pose
 from .graph import PoseEdge, optimize_poses, relative_pose
@@ -12,7 +23,15 @@ from .plans import (
     expected_vs_actual,
     predict_probe,
 )
-from .models import Hypothesis, LoopClosure, PoseRecord, ProbePlan, Scan2D, new_id
+from .models import (
+    CalibrationVersion,
+    Hypothesis,
+    LoopClosure,
+    PoseRecord,
+    ProbePlan,
+    Scan2D,
+    new_id,
+)
 from .occupancy import OccupancyGrid
 from .storage import ProjectStore
 
@@ -25,6 +44,7 @@ class MappingRun:
     closures: list[LoopClosure]
     hypotheses: list[Hypothesis]
     probe_plans: list[ProbePlan]
+    calibrations: list[CalibrationVersion]
 
 
 class MappingPlatform:
@@ -35,14 +55,14 @@ class MappingPlatform:
 
     def create_run(self, run_id: str) -> MappingRun:
         self.store.run_dir(run_id)
-        run = MappingRun(run_id, [], [], [], [], [])
+        run = MappingRun(run_id, [], [], [], [], [], [])
         self.runs[run_id] = run
         self._loaded.add(run_id)
         self.store.append_event({"type": "run_created", "run_id": run_id})
         return run
 
     def add_observation(self, run_id: str, pose: Pose, points: list[tuple[float, float]], sensor_id: str = "lidar_2d") -> None:
-        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], []))
+        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], []))
         self._loaded.add(run_id)
         index = len(run.scans)
         timestamp = float(index)
@@ -245,6 +265,7 @@ class MappingPlatform:
             record = outcome.to_dict()
             record.update(
                 {
+                    "hypothesis_id": hypothesis.hypothesis_id,
                     "status": "valid",
                     "source_x": None if source_position is None else float(source_position[0]),
                     "source_y": None if source_position is None else float(source_position[1]),
@@ -392,6 +413,324 @@ class MappingPlatform:
                 self.store.record_probe_plan(updated_plan)
         return {"run_id": run_id, "withdrawn_index": repeat_index, "restored_hypotheses": restored}
 
+    def register_calibration(self, run_id: str, name: str, reason: str = "") -> CalibrationVersion:
+        """Register a new sensor calibration revision without touching raw data or the map."""
+
+        run = self._run(run_id)
+        calibration = CalibrationVersion(
+            calibration_id=new_id("cal"),
+            run_id=run_id,
+            name=name,
+            reason=reason,
+        )
+        run.calibrations.append(calibration)
+        self.store.record_calibration(calibration)
+        self.store.append_event(
+            {
+                "type": "calibration_registered",
+                "run_id": run_id,
+                "calibration_id": calibration.calibration_id,
+                "name": name,
+                "reason": reason,
+            }
+        )
+        return calibration
+
+    def reinterpret_observation(
+        self,
+        calibration_id: str,
+        raw_index: int,
+        interpreted_index: int,
+        plan_id: str | None = None,
+        note: str = "",
+    ) -> dict[str, object]:
+        """Offer a new interpretation of one existing raw observation.
+
+        No scan is created: the raw index, collection timestamp and probe-plan
+        ownership stay attached to the original observation. The new reading is
+        evaluated inside every fold hypothesis as a proposed branch record and
+        never replaces the old interpretation or the public map by itself.
+        """
+
+        calibration = self.calibration(calibration_id)
+        if calibration.status == "withdrawn":
+            raise ValueError("cannot reinterpret under a withdrawn calibration")
+        run = self._run(calibration.run_id)
+        if raw_index < 0 or raw_index >= len(run.scans):
+            raise ValueError(f"unknown raw observation {raw_index}")
+        raw_scan = run.scans[raw_index]
+        interpretations = [dict(item) for item in calibration.interpretations if int(item["raw_index"]) != raw_index]
+        interpretations.append(
+            {
+                "raw_index": raw_index,
+                "interpreted_index": int(interpreted_index),
+                "status": PROPOSED,
+                "plan_id": plan_id,
+                "collected_at": raw_scan.timestamp,
+                "note": note,
+            }
+        )
+        evaluations = [dict(item) for item in calibration.evaluations if int(item["raw_index"]) != raw_index]
+        closures = {closure.closure_id: closure for closure in run.closures}
+        per_hypothesis: list[dict[str, object]] = []
+        for hypothesis in run.hypotheses:
+            if not hypothesis.closure_ids:
+                continue
+            closure = closures[next(iter(hypothesis.closure_ids))]
+            outcome = classify_observation(run.scans, closure, raw_index, int(interpreted_index))
+            if outcome is None:
+                continue
+            record = outcome.to_dict()
+            record.update(
+                {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "status": "valid",
+                    "calibration_id": calibration_id,
+                    "raw_index": raw_index,
+                    "interpreted_index": int(interpreted_index),
+                    "plan_id": plan_id,
+                    "collected_at": raw_scan.timestamp,
+                    "adoption": PROPOSED,
+                }
+            )
+            evaluations.append(record)
+            per_hypothesis.append(
+                {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "raw_index": raw_index,
+                    "interpreted_index": int(interpreted_index),
+                    "verdict": outcome.verdict,
+                }
+            )
+        updated = calibration.with_update(interpretations=tuple(interpretations), evaluations=tuple(evaluations))
+        self._replace_calibration(updated)
+        self.store.append_event(
+            {
+                "type": "observation_reinterpreted",
+                "run_id": run.run_id,
+                "calibration_id": calibration_id,
+                "raw_index": raw_index,
+                "interpreted_index": int(interpreted_index),
+                "plan_id": plan_id,
+                "note": note,
+            }
+        )
+        return {
+            "run_id": run.run_id,
+            "calibration_id": calibration_id,
+            "raw_index": raw_index,
+            "interpreted_index": int(interpreted_index),
+            "collected_at": raw_scan.timestamp,
+            "plan_id": plan_id,
+            "hypothesis_results": per_hypothesis,
+        }
+
+    def compare_calibration_branches(self, calibration_id: str) -> dict[str, object]:
+        """Compare keeping the old calibration against adopting the new one."""
+
+        calibration = self.calibration(calibration_id)
+        run = self._run(calibration.run_id)
+        comparison = compare_branches(run.hypotheses, calibration)
+        comparison["raw_scan_count"] = len(run.scans)
+        comparison["adopted_scope"] = {
+            "confirmed_raw_indices": sorted(
+                int(item["raw_index"])
+                for item in calibration.interpretations
+                if item.get("status") == CONFIRMED
+            ),
+            "proposed_raw_indices": sorted(
+                int(item["raw_index"])
+                for item in calibration.interpretations
+                if item.get("status", PROPOSED) == PROPOSED
+            ),
+        }
+        return comparison
+
+    def confirm_calibration_interpretation(
+        self,
+        calibration_id: str,
+        raw_indices: list[int],
+        reason: str = "manually accepted reinterpretation",
+    ) -> dict[str, object]:
+        """Confirm only part of a calibration's new interpretations.
+
+        The adoption scope is recorded with every affected hypothesis and map
+        constraint, and the old interpretation of the same raw scan is marked
+        superseded rather than counted twice. Unconfirmed reinterpretations
+        stay on the comparison branch.
+        """
+
+        calibration = self.calibration(calibration_id)
+        run = self._run(calibration.run_id)
+        wanted = {int(index) for index in raw_indices}
+        available = {int(item["raw_index"]) for item in calibration.interpretations}
+        unknown = wanted - available
+        if unknown:
+            raise ValueError(f"no reinterpretation for raw observations {sorted(unknown)}")
+        interpretations = []
+        for item in calibration.interpretations:
+            updated_item = dict(item)
+            if int(updated_item["raw_index"]) in wanted:
+                updated_item["status"] = CONFIRMED
+                updated_item["confirmation_reason"] = reason
+            interpretations.append(updated_item)
+        evaluations = []
+        for item in calibration.evaluations:
+            updated_item = dict(item)
+            if int(updated_item["raw_index"]) in wanted:
+                updated_item["adoption"] = CONFIRMED
+            evaluations.append(updated_item)
+        updated = calibration.with_update(interpretations=tuple(interpretations), evaluations=tuple(evaluations))
+        self._replace_calibration(updated)
+
+        affected: list[str] = []
+        for hypothesis in list(run.hypotheses):
+            if not hypothesis.closure_ids:
+                continue
+            evidence = []
+            changed = False
+            for item in hypothesis.evidence:
+                updated_item = dict(item)
+                if updated_item.get("calibration_id") == calibration_id and int(updated_item["repeat_index"]) in wanted:
+                    continue
+                if (
+                    int(updated_item["repeat_index"]) in wanted
+                    and updated_item.get("status", "valid") == "valid"
+                    and updated_item.get("calibration_id") != calibration_id
+                ):
+                    updated_item["status"] = "superseded_by_calibration"
+                    updated_item["superseded_by"] = calibration_id
+                    changed = True
+                evidence.append(updated_item)
+            branch_records = {
+                int(item["raw_index"]): dict(item)
+                for item in updated.evaluations
+                if item.get("hypothesis_id") == hypothesis.hypothesis_id
+                and int(item["raw_index"]) in wanted
+            }
+            existing = {int(item["repeat_index"]) for item in evidence if item.get("calibration_id") == calibration_id}
+            for raw_index in sorted(branch_records):
+                if raw_index not in existing:
+                    evidence.append(branch_records[raw_index])
+                    changed = True
+            if not changed:
+                continue
+            replacement = hypothesis.with_evidence(tuple(evidence))
+            combined = scoped_evidence(replacement, updated, include_proposed=False)
+            verdict = branch_verdict(combined)
+            if verdict["status"] == "eliminated":
+                replacement = replacement.with_status("eliminated", verdict["reason"])
+            elif replacement.status == "eliminated":
+                replacement = replacement.with_status(
+                    "active",
+                    "partially confirmed calibration scope insufficient for exclusion",
+                )
+            run.hypotheses = [
+                replacement if item.hypothesis_id == replacement.hypothesis_id else item
+                for item in run.hypotheses
+            ]
+            self.store.record_hypothesis(replacement)
+            affected.append(hypothesis.hypothesis_id)
+        self.store.append_event(
+            {
+                "type": "calibration_interpretation_confirmed",
+                "run_id": run.run_id,
+                "calibration_id": calibration_id,
+                "raw_indices": sorted(wanted),
+                "scope": sorted(wanted),
+                "affected_hypotheses": affected,
+                "reason": reason,
+            }
+        )
+        return {
+            "run_id": run.run_id,
+            "calibration_id": calibration_id,
+            "confirmed_raw_indices": sorted(wanted),
+            "affected_hypotheses": affected,
+        }
+
+    def withdraw_calibration(self, calibration_id: str, reason: str = "calibration revision withdrawn") -> dict[str, object]:
+        """Withdraw a revision: restore judgments that depended on it only.
+
+        Independent evidence from other observations keeps counting, and map
+        versions already built remain on disk as reviewable history.
+        """
+
+        calibration = self.calibration(calibration_id)
+        if calibration.status == "withdrawn":
+            return {"run_id": calibration.run_id, "calibration_id": calibration_id, "restored_hypotheses": []}
+        run = self._run(calibration.run_id)
+        updated = calibration.with_update(status="withdrawn", withdrawn_at=time.time(), reason=reason)
+        self._replace_calibration(updated)
+        restored: list[str] = []
+        for hypothesis in list(run.hypotheses):
+            evidence = []
+            touched = False
+            for item in hypothesis.evidence:
+                updated_item = dict(item)
+                if updated_item.get("calibration_id") == calibration_id:
+                    updated_item["status"] = CALIBRATION_WITHDRAWN
+                    updated_item["withdrawal_reason"] = reason
+                    touched = True
+                elif updated_item.get("superseded_by") == calibration_id:
+                    updated_item["status"] = "valid"
+                    updated_item.pop("superseded_by", None)
+                    touched = True
+                evidence.append(updated_item)
+            if not touched:
+                continue
+            replacement = hypothesis.with_evidence(tuple(evidence))
+            baseline = baseline_evidence(replacement)
+            baseline_reason = elimination_reason(tuple(baseline))
+            if baseline_reason and replacement.status in ("active", "eliminated"):
+                replacement = replacement.with_status("eliminated", baseline_reason)
+            elif replacement.status == "eliminated" and not baseline_reason:
+                replacement = replacement.with_status(
+                    "active",
+                    f"restored: calibration {calibration_id} withdrawn ({reason}); remaining independent evidence insufficient for exclusion",
+                )
+                restored.append(hypothesis.hypothesis_id)
+            run.hypotheses = [
+                replacement if item.hypothesis_id == replacement.hypothesis_id else item
+                for item in run.hypotheses
+            ]
+            self.store.record_hypothesis(replacement)
+        self.store.append_event(
+            {
+                "type": "calibration_withdrawn",
+                "run_id": run.run_id,
+                "calibration_id": calibration_id,
+                "restored_hypotheses": restored,
+                "reason": reason,
+            }
+        )
+        return {
+            "run_id": run.run_id,
+            "calibration_id": calibration_id,
+            "restored_hypotheses": restored,
+        }
+
+    def calibration(self, calibration_id: str) -> CalibrationVersion:
+        for run in self.runs.values():
+            for calibration in run.calibrations:
+                if calibration.calibration_id == calibration_id:
+                    return calibration
+        for calibration in self.store.load_calibrations():
+            if calibration.calibration_id == calibration_id:
+                return calibration
+        raise KeyError(f"unknown calibration: {calibration_id}")
+
+    def calibrations_for(self, run_id: str) -> list[CalibrationVersion]:
+        return list(self._run(run_id).calibrations)
+
+    def _replace_calibration(self, calibration: CalibrationVersion) -> None:
+        run = self._run(calibration.run_id)
+        run.calibrations = [
+            calibration if item.calibration_id == calibration.calibration_id else item
+            for item in run.calibrations
+        ]
+        self.store.record_calibration(calibration)
+
     def probe_plan(self, plan_id: str) -> ProbePlan:
         for run in self.runs.values():
             for plan in run.probe_plans:
@@ -438,6 +777,17 @@ class MappingPlatform:
                     "reason": closure.reason,
                 }
                 for closure in run.closures
+            ],
+            "calibrations": [
+                {
+                    "calibration_id": calibration.calibration_id,
+                    "name": calibration.name,
+                    "status": calibration.status,
+                    "reason": calibration.reason,
+                    "interpretations": list(calibration.interpretations),
+                    "evaluations": list(calibration.evaluations),
+                }
+                for calibration in run.calibrations
             ],
         }
 
@@ -570,21 +920,37 @@ class MappingPlatform:
                 result[start + local] = pose
         return result
 
-    def build_map(self, run_id: str, version_label: str, resolution: float = 0.1, hypothesis_id: str | None = None) -> dict[str, object]:
+    def build_map(
+        self,
+        run_id: str,
+        version_label: str,
+        resolution: float = 0.1,
+        hypothesis_id: str | None = None,
+        calibration_id: str | None = None,
+        include_proposed_interpretations: bool = True,
+    ) -> dict[str, object]:
         run = self._run(run_id)
         hypothesis = self.hypothesis(hypothesis_id) if hypothesis_id is not None else None
         poses = self.corrected_poses(run_id, hypothesis_id)
+        calibration = self.calibration(calibration_id) if calibration_id is not None else None
+        placement: dict[int, int] = {}
+        if calibration is not None:
+            for item in calibration.interpretations:
+                status = item.get("status", PROPOSED)
+                if status == CONFIRMED or (include_proposed_interpretations and status == PROPOSED):
+                    placement[int(item["raw_index"])] = int(item["interpreted_index"])
         all_points = []
         for pose, scan in zip(poses, run.scans):
-            all_points.extend(pose.transform(point) for point in scan.points)
+            placed_pose = poses[placement.get(scan.index, scan.index)]
+            all_points.extend(placed_pose.transform(point) for point in scan.points)
         margin = 1.0
         min_x = min(x for x, _ in all_points) - margin
         max_x = max(x for x, _ in all_points) + margin
         min_y = min(y for _, y in all_points) - margin
         max_y = max(y for _, y in all_points) + margin
         grid = OccupancyGrid.create((min_x, min_y, max_x, max_y), resolution)
-        for pose, scan in zip(poses, run.scans):
-            grid.insert_scan(pose, list(scan.points))
+        for pose_index, scan in enumerate(run.scans):
+            grid.insert_scan(poses[placement.get(scan.index, pose_index)], list(scan.points))
         version_id = new_id("map")
         if hypothesis is not None:
             applied = list(hypothesis.closure_ids)
@@ -602,9 +968,27 @@ class MappingPlatform:
             "hypothesis_status": None if hypothesis is None else hypothesis.status,
             "poses": [pose.to_dict() for pose in poses],
             "raw_scan_count": len(run.scans),
+            "calibration_id": calibration_id,
+            "calibration_scope": None
+            if calibration is None
+            else {
+                "calibration_id": calibration_id,
+                "calibration_status": calibration.status,
+                "interpreted_raw_indices": sorted(placement),
+                "confirmed_raw_indices": sorted(
+                    int(item["raw_index"])
+                    for item in calibration.interpretations
+                    if item.get("status") == CONFIRMED
+                ),
+                "proposed_only_raw_indices": sorted(
+                    int(item["raw_index"])
+                    for item in calibration.interpretations
+                    if item.get("status", PROPOSED) == PROPOSED and include_proposed_interpretations
+                ),
+            },
         }
         self.store.save_map_version(version_id, payload, grid.to_pgm())
-        self.store.append_event({"type": "map_version", "run_id": run_id, "map_version_id": version_id, "label": version_label, "hypothesis_id": hypothesis_id})
+        self.store.append_event({"type": "map_version", "run_id": run_id, "map_version_id": version_id, "label": version_label, "hypothesis_id": hypothesis_id, "calibration_id": calibration_id, "calibration_scope": payload["calibration_scope"]})
         return payload
 
     def _replace_closure(self, updated: LoopClosure) -> None:
@@ -626,6 +1010,8 @@ class MappingPlatform:
             closures = [c for c in self.store.load_closures() if c.run_id == run_id]
             hypotheses = [h for h in self.store.load_hypotheses() if h.run_id == run_id]
             plans = [p for p in self.store.load_probe_plans() if p.run_id == run_id]
-            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans)
+            calibrations = self.store.load_calibrations()
+            run_calibrations = [c for c in calibrations if c.run_id == run_id]
+            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, run_calibrations)
             self._loaded.add(run_id)
         return self.runs[run_id]

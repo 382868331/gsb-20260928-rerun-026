@@ -129,8 +129,18 @@ def classify_observation(
     scans: list[Scan2D],
     closure: LoopClosure,
     repeat_index: int,
+    effective_index: int | None = None,
 ) -> ObservationOutcome | None:
-    anchor_index = fold_anchor_index(closure, repeat_index)
+    """Classify one raw scan against the fold.
+
+    ``repeat_index`` is the raw observation (its scan geometry, timestamp and
+    plan ownership never change). ``effective_index`` is where a calibration
+    revision places that observation; the fold is evaluated from the effective
+    position while the compared scan is still the raw one.
+    """
+
+    position_index = repeat_index if effective_index is None else effective_index
+    anchor_index = fold_anchor_index(closure, position_index)
     if (
         repeat_index < 0
         or repeat_index >= len(scans)

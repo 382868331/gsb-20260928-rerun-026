@@ -9,6 +9,9 @@ from .geometry import Pose
 
 ClosureStatus = Literal["proposed", "accepted", "rejected", "withdrawn"]
 HypothesisStatus = Literal["active", "eliminated", "confirmed"]
+CalibrationStatus = Literal["active", "withdrawn"]
+InterpretationStatus = Literal["proposed", "confirmed", "withdrawn"]
+BASELINE_CALIBRATION_ID = "cal_baseline"
 
 
 def new_id(prefix: str) -> str:
@@ -267,5 +270,75 @@ class ProbePlan:
             executions=tuple(data.get("executions", [])),
             branch_hypothesis_id=data.get("branch_hypothesis_id"),
             created_at=float(data["created_at"]),
+            reason=data.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
+class CalibrationVersion:
+    """A sensor calibration revision.
+
+    A revision never creates a new observation. It only offers a different
+    interpretation of the same raw scan: the same ``raw_index`` keeps its
+    collection timestamp and probe-plan ownership, but can be read at a
+    different effective position (``interpreted_index``) when the calibration
+    is applied. Interpretations are proposed, confirmed partially or withdrawn
+    without rewriting the raw scan log or the public map.
+    """
+
+    calibration_id: str
+    run_id: str
+    name: str
+    interpretations: tuple[dict[str, Any], ...] = ()
+    evaluations: tuple[dict[str, Any], ...] = ()
+    status: CalibrationStatus = "active"
+    created_at: float = field(default_factory=time.time)
+    withdrawn_at: float | None = None
+    reason: str = ""
+
+    def with_update(
+        self,
+        interpretations: tuple[dict[str, Any], ...] | None = None,
+        evaluations: tuple[dict[str, Any], ...] | None = None,
+        status: CalibrationStatus | None = None,
+        withdrawn_at: float | None | str = "unchanged",
+        reason: str | None = None,
+    ) -> "CalibrationVersion":
+        return CalibrationVersion(
+            self.calibration_id,
+            self.run_id,
+            self.name,
+            self.interpretations if interpretations is None else interpretations,
+            self.evaluations if evaluations is None else evaluations,
+            self.status if status is None else status,
+            self.created_at,
+            self.withdrawn_at if withdrawn_at == "unchanged" else withdrawn_at,
+            self.reason if reason is None else reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calibration_id": self.calibration_id,
+            "run_id": self.run_id,
+            "name": self.name,
+            "interpretations": list(self.interpretations),
+            "evaluations": list(self.evaluations),
+            "status": self.status,
+            "created_at": self.created_at,
+            "withdrawn_at": self.withdrawn_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CalibrationVersion":
+        return cls(
+            calibration_id=data["calibration_id"],
+            run_id=data["run_id"],
+            name=data.get("name", data["calibration_id"]),
+            interpretations=tuple(data.get("interpretations", [])),
+            evaluations=tuple(data.get("evaluations", [])),
+            status=data.get("status", "active"),
+            created_at=float(data["created_at"]) if "created_at" in data else time.time(),
+            withdrawn_at=None if data.get("withdrawn_at") is None else float(data["withdrawn_at"]),
             reason=data.get("reason", ""),
         )
