@@ -9,6 +9,8 @@ from .geometry import Pose
 
 ClosureStatus = Literal["proposed", "accepted", "rejected", "withdrawn"]
 HypothesisStatus = Literal["active", "eliminated", "confirmed"]
+CalibrationStatus = Literal["active", "withdrawn"]
+CalibrationItemStatus = Literal["tentative", "confirmed"]
 
 
 def new_id(prefix: str) -> str:
@@ -267,5 +269,151 @@ class ProbePlan:
             executions=tuple(data.get("executions", [])),
             branch_hypothesis_id=data.get("branch_hypothesis_id"),
             created_at=float(data["created_at"]),
+            reason=data.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
+class CalibrationItem:
+    """A reinterpretation of one raw observation under a later sensor calibration.
+
+    ``raw_index`` is the index of the original, append-only scan; the raw
+    observation, its collection time and its plan ownership never change.
+    ``interpreted_index`` is where the same raw observation lands under the new
+    calibration, which may be a neighbouring corridor or an index that has not
+    been observed yet. The item is only a tentative explanation until a human
+    confirms it; it is never a new observation collection.
+    """
+
+    raw_index: int
+    interpreted_index: int
+    range_scale: float = 1.0
+    angle_offset: float = 0.0
+    status: CalibrationItemStatus = "tentative"
+    detail: dict[str, Any] = field(default_factory=dict)
+    decided_at: float | None = None
+    decision_reason: str = ""
+
+    def confirmed(self, reason: str = "") -> "CalibrationItem":
+        return CalibrationItem(
+            self.raw_index,
+            self.interpreted_index,
+            self.range_scale,
+            self.angle_offset,
+            "confirmed",
+            dict(self.detail),
+            time.time(),
+            reason or self.decision_reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "raw_index": self.raw_index,
+            "interpreted_index": self.interpreted_index,
+            "range_scale": self.range_scale,
+            "angle_offset": self.angle_offset,
+            "status": self.status,
+            "detail": self.detail,
+            "decided_at": self.decided_at,
+            "decision_reason": self.decision_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CalibrationItem":
+        return cls(
+            raw_index=int(data["raw_index"]),
+            interpreted_index=int(data["interpreted_index"]),
+            range_scale=float(data.get("range_scale", 1.0)),
+            angle_offset=float(data.get("angle_offset", 0.0)),
+            status=data.get("status", "tentative"),
+            detail=dict(data.get("detail", {})),
+            decided_at=None if data.get("decided_at") is None else float(data["decided_at"]),
+            decision_reason=data.get("decision_reason", ""),
+        )
+
+
+@dataclass(frozen=True)
+class CalibrationRevision:
+    """A sensor calibration version that reinterprets already collected raw scans.
+
+    A revision never appends scans: every item keeps its ``raw_index`` plus the
+    original collection time and plan ownership. Its items start tentative so the
+    old- and new-calibration branches can be compared side by side. Withdrawing a
+    revision restores judgments that depended solely on it while independent
+    evidence remains in force.
+    """
+
+    calibration_id: str
+    run_id: str
+    sensor_id: str
+    base_calibration_id: str | None
+    status: CalibrationStatus
+    items: tuple[CalibrationItem, ...]
+    created_at: float = field(default_factory=time.time)
+    withdrawn_at: float | None = None
+    reason: str = ""
+
+    def with_items(self, items: tuple[CalibrationItem, ...], reason: str | None = None) -> "CalibrationRevision":
+        return CalibrationRevision(
+            self.calibration_id,
+            self.run_id,
+            self.sensor_id,
+            self.base_calibration_id,
+            self.status,
+            items,
+            self.created_at,
+            self.withdrawn_at,
+            self.reason if reason is None else reason,
+        )
+
+    def withdrawn(self, reason: str) -> "CalibrationRevision":
+        return CalibrationRevision(
+            self.calibration_id,
+            self.run_id,
+            self.sensor_id,
+            self.base_calibration_id,
+            "withdrawn",
+            tuple(
+                CalibrationItem(
+                    item.raw_index,
+                    item.interpreted_index,
+                    item.range_scale,
+                    item.angle_offset,
+                    item.status,
+                    dict(item.detail),
+                    item.decided_at,
+                    item.decision_reason,
+                )
+                for item in self.items
+            ),
+            self.created_at,
+            time.time(),
+            reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calibration_id": self.calibration_id,
+            "run_id": self.run_id,
+            "sensor_id": self.sensor_id,
+            "base_calibration_id": self.base_calibration_id,
+            "status": self.status,
+            "items": [item.to_dict() for item in self.items],
+            "created_at": self.created_at,
+            "withdrawn_at": self.withdrawn_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CalibrationRevision":
+        return cls(
+            calibration_id=data["calibration_id"],
+            run_id=data["run_id"],
+            sensor_id=data.get("sensor_id", "lidar_2d"),
+            base_calibration_id=data.get("base_calibration_id"),
+            status=data.get("status", "active"),
+            items=tuple(CalibrationItem.from_dict(item) for item in data.get("items", [])),
+            created_at=float(data["created_at"]),
+            withdrawn_at=None if data.get("withdrawn_at") is None else float(data["withdrawn_at"]),
             reason=data.get("reason", ""),
         )
