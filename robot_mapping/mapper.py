@@ -750,9 +750,14 @@ class MappingPlatform:
                 if branch["interpretation_status"] in (PROPOSED, CONFIRMED)
                 and branch["calibration_status"] == "active"
             ]
-            if len(adopted) == 1:
+            # Resolution is recomputed from the original observation, the
+            # candidate readings still in force and explicit confirmations.
+            # A single surviving revision after the other one was withdrawn is
+            # merely a still-pending candidate: it must not be auto-adopted
+            # just because it is the last revision left.
+            if adopted:
                 resolution = f"adopted:{adopted[0]['calibration_id']}"
-            elif len(live) >= 2:
+            elif live:
                 resolution = "pending"
             else:
                 resolution = "resolved"

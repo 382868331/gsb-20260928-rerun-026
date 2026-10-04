@@ -183,6 +183,86 @@ class IndependentReviewerRevisionTest(unittest.TestCase):
             reviewers = {item["reviewer"] for item in reloaded_trace["calibrations"]}
             self.assertEqual(reviewers, {"reviewer-a", "reviewer-b"})
 
+    def test_withdrawing_adopted_revision_reopens_conflict_instead_of_auto_adopting_rival(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platform = MappingPlatform(directory)
+            _scenario, fold, _distinct, _plan = _eliminated_fold(platform)
+            raw_before = _scan_bytes(platform)
+            revision_a = platform.register_calibration(
+                "similar", "reviewer A revision", reviewer="reviewer-a"
+            )
+            platform.reinterpret_observation(revision_a.calibration_id, 46, 34)
+            platform.reinterpret_observation(revision_a.calibration_id, 47, 35)
+            # explicit confirmation covers only half of the batch
+            platform.confirm_calibration_interpretation(
+                revision_a.calibration_id, [46], "reviewer A: only the first reading checked"
+            )
+            # the other reviewer registers a conflicting revision of both observations
+            revision_b = platform.register_calibration(
+                "similar", "reviewer B revision", reviewer="reviewer-b"
+            )
+            platform.reinterpret_observation(revision_b.calibration_id, 46, 40)
+            platform.reinterpret_observation(revision_b.calibration_id, 47, 41)
+            # the original decision is withdrawn; reviewer B's readings were never adopted
+            platform.withdraw_calibration(revision_a.calibration_id, "reviewer A recalled the revision")
+            comparison = platform.compare_reviewer_conflicts("similar")
+            resolutions = {entry["raw_index"]: entry["resolution"] for entry in comparison["conflicts"]}
+            # a lone surviving revision must not be auto-adopted: both observations
+            # return to pending because no explicit confirmation remains in force
+            self.assertEqual(resolutions, {46: "pending", 47: "pending"})
+            for entry in comparison["conflicts"]:
+                self.assertTrue(entry["ambiguity_remains"])
+                statuses = {branch["interpretation_status"] for branch in entry["branches"]}
+                self.assertEqual(statuses, {"withdrawn", "proposed"})
+            trace = platform.decision_trace("similar")
+            provenance = {entry["raw_index"]: entry for entry in trace["observation_provenance"]}
+            for raw_index in (46, 47):
+                self.assertNotEqual(provenance[raw_index]["state"], "adopted")
+            # confirming one observation alone leaves the other conflict pending
+            platform.confirm_calibration_interpretation(
+                revision_b.calibration_id, [46], "adopt reviewer B for raw 46 only"
+            )
+            partial = platform.compare_reviewer_conflicts("similar")
+            partial_resolutions = {entry["raw_index"]: entry["resolution"] for entry in partial["conflicts"]}
+            self.assertTrue(partial_resolutions[46].startswith("adopted:"))
+            self.assertEqual(partial_resolutions[47], "pending")
+            # repeated confirmation adds no support: raw 46 counts exactly once
+            fold_now = platform.hypothesis(fold.hypothesis_id)
+            valid_46 = [
+                item
+                for item in fold_now.evidence
+                if int(item["repeat_index"]) == 46 and item.get("status", "valid") == "valid"
+            ]
+            self.assertEqual(len(valid_46), 1)
+            repeat = platform.confirm_calibration_interpretation(
+                revision_b.calibration_id, [46], "duplicate confirmation"
+            )
+            self.assertTrue(repeat["unchanged"])
+            fold_after_repeat = platform.hypothesis(fold.hypothesis_id)
+            valid_46_after = [
+                item
+                for item in fold_after_repeat.evidence
+                if int(item["repeat_index"]) == 46 and item.get("status", "valid") == "valid"
+            ]
+            self.assertEqual(len(valid_46_after), 1)
+            # save & reopen keeps adoption, withdrawal and the pending conflict consistent
+            reopened = MappingPlatform(directory)
+            reloaded = reopened.compare_reviewer_conflicts("similar")
+            reloaded_resolutions = {entry["raw_index"]: entry["resolution"] for entry in reloaded["conflicts"]}
+            self.assertTrue(reloaded_resolutions[46].startswith("adopted:"))
+            self.assertEqual(reloaded_resolutions[47], "pending")
+            reloaded_provenance = {
+                entry["raw_index"]: entry
+                for entry in reopened.decision_trace("similar")["observation_provenance"]
+            }
+            self.assertEqual(reloaded_provenance[46]["state"], "adopted")
+            self.assertNotEqual(reloaded_provenance[47]["state"], "adopted")
+            # the raw scan log is byte-identical through the entire workflow
+            self.assertEqual(
+                hashlib.sha256(raw_before).hexdigest(),
+                hashlib.sha256(_scan_bytes(reopened)).hexdigest(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
