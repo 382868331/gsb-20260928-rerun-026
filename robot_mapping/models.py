@@ -9,7 +9,7 @@ from .geometry import Pose
 
 ClosureStatus = Literal["proposed", "accepted", "rejected", "withdrawn"]
 HypothesisStatus = Literal["active", "eliminated", "confirmed"]
-CalibrationStatus = Literal["active", "withdrawn"]
+CalibrationStatus = Literal["active", "withdrawn", "partially_withdrawn"]
 InterpretationStatus = Literal["proposed", "confirmed", "withdrawn"]
 BASELINE_CALIBRATION_ID = "cal_baseline"
 
@@ -295,6 +295,8 @@ class CalibrationVersion:
     created_at: float = field(default_factory=time.time)
     withdrawn_at: float | None = None
     reason: str = ""
+    batch_id: str | None = None
+    reviewer_id: str | None = None
 
     def with_update(
         self,
@@ -314,6 +316,8 @@ class CalibrationVersion:
             self.created_at,
             self.withdrawn_at if withdrawn_at == "unchanged" else withdrawn_at,
             self.reason if reason is None else reason,
+            self.batch_id,
+            self.reviewer_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -327,6 +331,8 @@ class CalibrationVersion:
             "created_at": self.created_at,
             "withdrawn_at": self.withdrawn_at,
             "reason": self.reason,
+            "batch_id": self.batch_id,
+            "reviewer_id": self.reviewer_id,
         }
 
     @classmethod
@@ -341,4 +347,57 @@ class CalibrationVersion:
             created_at=float(data["created_at"]) if "created_at" in data else time.time(),
             withdrawn_at=None if data.get("withdrawn_at") is None else float(data["withdrawn_at"]),
             reason=data.get("reason", ""),
+            batch_id=data.get("batch_id"),
+            reviewer_id=data.get("reviewer_id"),
+        )
+
+
+@dataclass(frozen=True)
+class ReviewBatch:
+    """A user-selected scope of raw observations undergoing independent reviewer revisions."""
+
+    batch_id: str
+    run_id: str
+    name: str
+    raw_indices: tuple[int, ...]
+    revision_ids: tuple[str, ...] = ()
+    created_at: float = field(default_factory=time.time)
+    raw_scan_sha256: str = ""
+    raw_scan_bytes: int = 0
+
+    def with_revision_ids(self, revision_ids: tuple[str, ...]) -> "ReviewBatch":
+        return ReviewBatch(
+            self.batch_id,
+            self.run_id,
+            self.name,
+            self.raw_indices,
+            revision_ids,
+            self.created_at,
+            self.raw_scan_sha256,
+            self.raw_scan_bytes,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "run_id": self.run_id,
+            "name": self.name,
+            "raw_indices": list(self.raw_indices),
+            "revision_ids": list(self.revision_ids),
+            "created_at": self.created_at,
+            "raw_scan_sha256": self.raw_scan_sha256,
+            "raw_scan_bytes": self.raw_scan_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ReviewBatch":
+        return cls(
+            batch_id=data["batch_id"],
+            run_id=data["run_id"],
+            name=data.get("name", data["batch_id"]),
+            raw_indices=tuple(int(item) for item in data.get("raw_indices", [])),
+            revision_ids=tuple(data.get("revision_ids", [])),
+            created_at=float(data.get("created_at", time.time())),
+            raw_scan_sha256=data.get("raw_scan_sha256", ""),
+            raw_scan_bytes=int(data.get("raw_scan_bytes", 0)),
         )

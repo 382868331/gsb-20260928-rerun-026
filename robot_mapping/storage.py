@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .models import CalibrationVersion, Hypothesis, LoopClosure, PoseRecord, ProbePlan, Scan2D
+from .models import CalibrationVersion, Hypothesis, LoopClosure, PoseRecord, ProbePlan, ReviewBatch, Scan2D
 
 
 class ProjectStore:
@@ -81,6 +81,24 @@ class ProjectStore:
 
     def record_calibration(self, calibration: CalibrationVersion) -> None:
         self.append_event({"type": "calibration", "calibration": calibration.to_dict()})
+
+    def load_review_batches(self) -> list[ReviewBatch]:
+        latest: dict[str, ReviewBatch] = {}
+        for item in self._read_jsonl(self.events_path):
+            if "review_batch" in item:
+                batch = ReviewBatch.from_dict(item["review_batch"])
+                latest[batch.batch_id] = batch
+        return [latest[key] for key in sorted(latest)]
+
+    def record_review_batch(self, batch: ReviewBatch) -> None:
+        self.append_event({"type": "review_batch", "review_batch": batch.to_dict()})
+
+    def save_review_export(self, batch_id: str, payload: dict[str, Any]) -> Path:
+        target = self.root / "reviews" / batch_id
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / "review_export.json"
+        self._write_json(path, payload)
+        return path
 
     def append_event(self, event: dict[str, Any]) -> None:
         self._append_jsonl(self.events_path, event)

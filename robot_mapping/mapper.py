@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 
@@ -29,6 +31,7 @@ from .models import (
     LoopClosure,
     PoseRecord,
     ProbePlan,
+    ReviewBatch,
     Scan2D,
     new_id,
 )
@@ -45,6 +48,7 @@ class MappingRun:
     hypotheses: list[Hypothesis]
     probe_plans: list[ProbePlan]
     calibrations: list[CalibrationVersion]
+    review_batches: list[ReviewBatch]
 
 
 class MappingPlatform:
@@ -55,14 +59,14 @@ class MappingPlatform:
 
     def create_run(self, run_id: str) -> MappingRun:
         self.store.run_dir(run_id)
-        run = MappingRun(run_id, [], [], [], [], [], [])
+        run = MappingRun(run_id, [], [], [], [], [], [], [])
         self.runs[run_id] = run
         self._loaded.add(run_id)
         self.store.append_event({"type": "run_created", "run_id": run_id})
         return run
 
     def add_observation(self, run_id: str, pose: Pose, points: list[tuple[float, float]], sensor_id: str = "lidar_2d") -> None:
-        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], []))
+        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], [], []))
         self._loaded.add(run_id)
         index = len(run.scans)
         timestamp = float(index)
@@ -413,7 +417,14 @@ class MappingPlatform:
                 self.store.record_probe_plan(updated_plan)
         return {"run_id": run_id, "withdrawn_index": repeat_index, "restored_hypotheses": restored}
 
-    def register_calibration(self, run_id: str, name: str, reason: str = "") -> CalibrationVersion:
+    def register_calibration(
+        self,
+        run_id: str,
+        name: str,
+        reason: str = "",
+        batch_id: str | None = None,
+        reviewer_id: str | None = None,
+    ) -> CalibrationVersion:
         """Register a new sensor calibration revision without touching raw data or the map."""
 
         run = self._run(run_id)
@@ -422,8 +433,17 @@ class MappingPlatform:
             run_id=run_id,
             name=name,
             reason=reason,
+            batch_id=batch_id,
+            reviewer_id=reviewer_id,
         )
         run.calibrations.append(calibration)
+        if batch_id is not None:
+            batch = self.review_batch(batch_id)
+            if batch.run_id != run_id:
+                raise ValueError("review batch belongs to a different run")
+            self._replace_review_batch(
+                batch.with_revision_ids(tuple(sorted(set(batch.revision_ids + (calibration.calibration_id,)))))
+            )
         self.store.record_calibration(calibration)
         self.store.append_event(
             {
@@ -432,9 +452,480 @@ class MappingPlatform:
                 "calibration_id": calibration.calibration_id,
                 "name": name,
                 "reason": reason,
+                "batch_id": batch_id,
+                "reviewer_id": reviewer_id,
             }
         )
         return calibration
+
+    def create_review_batch(
+        self,
+        run_id: str,
+        raw_indices: list[int],
+        name: str = "independent reviewer batch",
+    ) -> ReviewBatch:
+        """Freeze exactly the user-selected raw observation scope for review."""
+
+        run = self._run(run_id)
+        wanted = sorted({int(index) for index in raw_indices})
+        if not wanted:
+            raise ValueError("review batch must contain at least one raw observation")
+        unknown = [index for index in wanted if index < 0 or index >= len(run.scans)]
+        if unknown:
+            raise ValueError(f"unknown raw observations {unknown}")
+        scan_path = self.store.run_dir(run_id) / "scans.jsonl"
+        digest = hashlib.sha256()
+        selected_bytes = 0
+        with scan_path.open("rb") as stream:
+            for line in stream:
+                item = json.loads(line.decode("utf-8"))
+                if int(item["index"]) in wanted:
+                    digest.update(line)
+                    selected_bytes += len(line)
+        batch = ReviewBatch(
+            batch_id=new_id("review"),
+            run_id=run_id,
+            name=name,
+            raw_indices=tuple(wanted),
+            raw_scan_sha256=digest.hexdigest(),
+            raw_scan_bytes=selected_bytes,
+        )
+        run.review_batches.append(batch)
+        self.store.record_review_batch(batch)
+        self.store.append_event(
+            {
+                "type": "review_batch_created",
+                "run_id": run_id,
+                "batch_id": batch.batch_id,
+                "raw_indices": wanted,
+                "raw_scan_sha256": batch.raw_scan_sha256,
+            }
+        )
+        return batch
+
+    def register_reviewer_revision(
+        self,
+        batch_id: str,
+        reviewer_id: str,
+        name: str,
+        reason: str = "",
+    ) -> CalibrationVersion:
+        batch = self.review_batch(batch_id)
+        existing = [
+            calibration
+            for calibration in self._run(batch.run_id).calibrations
+            if calibration.batch_id == batch_id and calibration.reviewer_id == reviewer_id
+        ]
+        if existing:
+            raise ValueError(f"reviewer {reviewer_id} already has revision {existing[0].calibration_id}")
+        return self.register_calibration(
+            batch.run_id,
+            name,
+            reason=reason,
+            batch_id=batch_id,
+            reviewer_id=reviewer_id,
+        )
+
+    def compare_review_batch(self, batch_id: str) -> dict[str, object]:
+        """Place competing reviewer explanations side by side without selecting one."""
+
+        batch = self.review_batch(batch_id)
+        run = self._run(batch.run_id)
+        revisions = self._batch_revisions(batch)
+        active_revisions = [revision for revision in revisions if revision.status != "withdrawn"]
+        interpretation_maps = [
+            {
+                int(item["raw_index"]): item
+                for item in revision.interpretations
+                if int(item["raw_index"]) in set(batch.raw_indices)
+            }
+            for revision in active_revisions
+        ]
+        conflicts = []
+        for raw_index in batch.raw_indices:
+            present = [item.get(raw_index) for item in interpretation_maps]
+            present = [item for item in present if item is not None and item.get("status") != "withdrawn"]
+            if any(item.get("status") == CONFIRMED for item in present):
+                continue
+            by_revision = {}
+            original_hypotheses = {hypothesis.hypothesis_id: hypothesis for hypothesis in run.hypotheses if hypothesis.closure_ids}
+            original_status = "valid" if any(
+                item.get("status", "valid") == "valid"
+                and not item.get("calibration_id")
+                and int(item["repeat_index"]) == raw_index
+                for hypothesis in original_hypotheses.values()
+                for item in hypothesis.evidence
+            ) else "not_observed"
+            original_records = [
+                item
+                for hypothesis in original_hypotheses.values()
+                for item in hypothesis.evidence
+                if int(item["repeat_index"]) == raw_index and not item.get("calibration_id")
+            ]
+            if original_records:
+                original_status = str(original_records[0].get("status", "valid"))
+            source_positions = {raw_index} if original_status == "valid" else set()
+            by_revision["original"] = {
+                "revision_id": "original",
+                "reviewer_id": "original_survey",
+                "interpreted_index": raw_index,
+                "status": original_status,
+            }
+            for revision, item in zip(active_revisions, interpretation_maps):
+                if raw_index not in item:
+                    continue
+                interpretation = item[raw_index]
+                source_positions.add(int(interpretation["interpreted_index"]))
+                by_revision[revision.calibration_id] = {
+                    "revision_id": revision.calibration_id,
+                    "reviewer_id": revision.reviewer_id,
+                    "interpreted_index": int(interpretation["interpreted_index"]),
+                    "status": interpretation.get("status", PROPOSED),
+                }
+            if len(source_positions) <= 1:
+                continue
+            per_hypothesis = []
+            for hypothesis in run.hypotheses:
+                if not hypothesis.closure_ids:
+                    continue
+                branches = {
+                    "original": self._raw_review_verdict(hypothesis, raw_index),
+                }
+                for revision, item in zip(active_revisions, interpretation_maps):
+                    interpretation = item.get(raw_index)
+                    if interpretation is None:
+                        continue
+                    branches[revision.calibration_id] = {
+                        "reviewer_id": revision.reviewer_id,
+                        "interpreted_index": int(interpretation["interpreted_index"]),
+                        "verdict": self._evaluation_verdict(revision, hypothesis.hypothesis_id, raw_index),
+                        "branch_status": branch_verdict(calibrated_evidence(hypothesis, revision))["status"],
+                    }
+                per_hypothesis.append(
+                    {
+                        "hypothesis_id": hypothesis.hypothesis_id,
+                        "hypothesis_name": hypothesis.name,
+                        "branches": branches,
+                    }
+                )
+            conflicts.append(
+                {
+                    "raw_index": raw_index,
+                    "status": "unresolved_conflict",
+                    "sources": list(by_revision.values()),
+                    "hypothesis_impacts": per_hypothesis,
+                }
+            )
+        return {
+            "batch_id": batch_id,
+            "run_id": batch.run_id,
+            "selected_raw_indices": list(batch.raw_indices),
+            "raw_scan_sha256": batch.raw_scan_sha256,
+            "raw_scan_bytes": batch.raw_scan_bytes,
+            "raw_scan_unchanged": self._batch_raw_scan_digest(batch) == batch.raw_scan_sha256,
+            "revisions": [self._revision_summary(revision) for revision in revisions],
+            "conflicts": conflicts,
+        }
+
+    def confirm_review_scope(
+        self,
+        batch_id: str,
+        revision_id: str,
+        raw_indices: list[int],
+        reason: str = "user selected reviewer observation scope",
+    ) -> dict[str, object]:
+        """Adopt exactly the chosen observations from one reviewer revision."""
+
+        batch = self.review_batch(batch_id)
+        run = self._run(batch.run_id)
+        revision = self._batch_revision(batch, revision_id)
+        wanted = sorted({int(index) for index in raw_indices})
+        outside = [index for index in wanted if index not in set(batch.raw_indices)]
+        if outside:
+            raise ValueError(f"observations {outside} are outside the selected review batch")
+        available = {
+            int(item["raw_index"]): item
+            for item in revision.interpretations
+            if item.get("status") != "withdrawn"
+        }
+        unknown = [index for index in wanted if index not in available]
+        if unknown:
+            raise ValueError(f"revision has no active interpretation for observations {unknown}")
+        other_decision = []
+        for other in self._batch_revisions(batch):
+            if other.calibration_id == revision_id or other.status == "withdrawn":
+                continue
+            for item in other.interpretations:
+                if int(item["raw_index"]) in wanted and item.get("status") == CONFIRMED:
+                    other_decision.append((int(item["raw_index"]), other.calibration_id))
+        if other_decision:
+            raise ValueError(f"existing competing decisions must be withdrawn first: {other_decision}")
+        already = sorted(
+            int(item["raw_index"])
+            for item in revision.interpretations
+            if int(item["raw_index"]) in set(wanted) and item.get("status") == CONFIRMED
+        )
+        newly_confirmed = sorted(set(wanted) - set(already))
+        if newly_confirmed:
+            self.confirm_calibration_interpretation(revision_id, newly_confirmed, reason)
+        event = {
+            "type": "review_scope_confirmed",
+            "run_id": run.run_id,
+            "batch_id": batch_id,
+            "revision_id": revision_id,
+            "reviewer_id": revision.reviewer_id,
+            "raw_indices": wanted,
+            "already_confirmed": already,
+            "newly_confirmed": newly_confirmed,
+            "reason": reason,
+        }
+        if newly_confirmed:
+            self.store.append_event(event)
+        return {
+            "run_id": run.run_id,
+            "batch_id": batch_id,
+            "revision_id": revision_id,
+            "reviewer_id": revision.reviewer_id,
+            "confirmed_raw_indices": wanted,
+            "already_confirmed": already,
+            "newly_confirmed": newly_confirmed,
+        }
+
+    def withdraw_reviewer_revision(
+        self,
+        batch_id: str,
+        revision_id: str,
+        raw_indices: list[int] | None = None,
+        reason: str = "reviewer revision withdrawn",
+    ) -> dict[str, object]:
+        """Withdraw all or an explicitly scoped part of one reviewer revision."""
+
+        batch = self.review_batch(batch_id)
+        run = self._run(batch.run_id)
+        revision = self._batch_revision(batch, revision_id)
+        scope = set(batch.raw_indices) if raw_indices is None else {int(index) for index in raw_indices}
+        unknown = sorted(scope - set(batch.raw_indices))
+        if unknown:
+            raise ValueError(f"observations {unknown} are outside the selected review batch")
+        available = {int(item["raw_index"]) for item in revision.interpretations if int(item["raw_index"]) in scope}
+        missing = sorted(scope - available)
+        if missing:
+            raise ValueError(f"revision has no interpretation for observations {missing}")
+        interpretations = []
+        for item in revision.interpretations:
+            updated = dict(item)
+            if int(updated["raw_index"]) in scope and updated.get("status") != "withdrawn":
+                updated["status"] = "withdrawn"
+                updated["withdrawal_reason"] = reason
+            interpretations.append(updated)
+        evaluations = []
+        for item in revision.evaluations:
+            updated = dict(item)
+            if int(updated["raw_index"]) in scope and updated.get("status", "valid") == "valid":
+                updated["status"] = CALIBRATION_WITHDRAWN
+                updated["withdrawal_reason"] = reason
+            evaluations.append(updated)
+        remaining = [item for item in interpretations if item.get("status") != "withdrawn"]
+        status = "withdrawn" if not remaining else "partially_withdrawn"
+        withdrawn_at = time.time() if status == "withdrawn" else revision.withdrawn_at
+        updated_revision = revision.with_update(
+            interpretations=tuple(interpretations),
+            evaluations=tuple(evaluations),
+            status=status,
+            withdrawn_at=withdrawn_at,
+            reason=reason if status == "withdrawn" else revision.reason,
+        )
+        self._replace_calibration(updated_revision)
+        restored = self._restore_withdrawn_interpretation_effects(run, revision_id, scope, reason)
+        self.store.append_event(
+            {
+                "type": "reviewer_revision_withdrawn",
+                "run_id": run.run_id,
+                "batch_id": batch_id,
+                "revision_id": revision_id,
+                "reviewer_id": revision.reviewer_id,
+                "raw_indices": sorted(scope),
+                "remaining_interpretation_indices": [int(item["raw_index"]) for item in remaining],
+                "restored_hypotheses": restored,
+                "reason": reason,
+            }
+        )
+        return {
+            "run_id": run.run_id,
+            "batch_id": batch_id,
+            "revision_id": revision_id,
+            "reviewer_id": revision.reviewer_id,
+            "withdrawn_raw_indices": sorted(scope),
+            "revision_status": status,
+            "restored_hypotheses": restored,
+        }
+
+    def export_review_batch(self, batch_id: str, write_file: bool = True) -> dict[str, object]:
+        comparison = self.compare_review_batch(batch_id)
+        batch = self.review_batch(batch_id)
+        run = self._run(batch.run_id)
+        revisions = self._batch_revisions(batch)
+        adopted, withdrawn, revision_sources = [], [], []
+        for revision in revisions:
+            revision_sources.append(self._revision_summary(revision))
+            for item in revision.interpretations:
+                raw_index = int(item["raw_index"])
+                if raw_index not in set(batch.raw_indices):
+                    continue
+                scan = run.scans[raw_index]
+                source = {
+                    "raw_index": raw_index,
+                    "scan_id": scan.scan_id,
+                    "sensor_id": scan.sensor_id,
+                    "collected_at": scan.timestamp,
+                    "revision_id": revision.calibration_id,
+                    "reviewer_id": revision.reviewer_id,
+                    "interpreted_index": int(item["interpreted_index"]),
+                    "status": item.get("status", PROPOSED),
+                    "plan_id": item.get("plan_id"),
+                    "note": item.get("note", ""),
+                    "reason": item.get("confirmation_reason") or item.get("withdrawal_reason") or revision.reason,
+                }
+                if item.get("status") == CONFIRMED:
+                    adopted.append(source)
+                elif item.get("status") == "withdrawn":
+                    withdrawn.append(source)
+        payload = {
+            **comparison,
+            "adopted": sorted(adopted, key=lambda item: (item["raw_index"], item["revision_id"])),
+            "withdrawn": sorted(withdrawn, key=lambda item: (item["raw_index"], item["revision_id"])),
+            "remaining_conflicts": comparison["conflicts"],
+            "existing_decisions": [item for item in adopted],
+            "revision_sources": revision_sources,
+        }
+        if write_file:
+            path = self.store.save_review_export(batch_id, payload)
+            payload["export_path"] = str(path)
+        return payload
+
+    def review_batch(self, batch_id: str) -> ReviewBatch:
+        for run in self.runs.values():
+            for batch in run.review_batches:
+                if batch.batch_id == batch_id:
+                    return batch
+        for batch in self.store.load_review_batches():
+            if batch.batch_id == batch_id:
+                return batch
+        raise KeyError(f"unknown review batch: {batch_id}")
+
+    def review_batches_for(self, run_id: str) -> list[ReviewBatch]:
+        return list(self._run(run_id).review_batches)
+
+    def _replace_review_batch(self, batch: ReviewBatch) -> None:
+        run = self._run(batch.run_id)
+        run.review_batches = [
+            batch if item.batch_id == batch.batch_id else item
+            for item in run.review_batches
+        ]
+        self.store.record_review_batch(batch)
+
+    def _batch_revisions(self, batch: ReviewBatch) -> list[CalibrationVersion]:
+        return [
+            revision
+            for revision in self._run(batch.run_id).calibrations
+            if revision.batch_id == batch.batch_id
+        ]
+
+    def _batch_revision(self, batch: ReviewBatch, revision_id: str) -> CalibrationVersion:
+        revisions = [item for item in self._batch_revisions(batch) if item.calibration_id == revision_id]
+        if not revisions:
+            raise ValueError(f"revision {revision_id} does not belong to batch {batch.batch_id}")
+        return revisions[0]
+
+    def _batch_raw_scan_digest(self, batch: ReviewBatch) -> str:
+        wanted = set(batch.raw_indices)
+        digest = hashlib.sha256()
+        scan_path = self.store.run_dir(batch.run_id) / "scans.jsonl"
+        with scan_path.open("rb") as stream:
+            for line in stream:
+                item = json.loads(line.decode("utf-8"))
+                if int(item["index"]) in wanted:
+                    digest.update(line)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _revision_summary(revision: CalibrationVersion) -> dict[str, object]:
+        return {
+            "revision_id": revision.calibration_id,
+            "reviewer_id": revision.reviewer_id,
+            "name": revision.name,
+            "status": revision.status,
+            "reason": revision.reason,
+            "raw_indices": sorted(int(item["raw_index"]) for item in revision.interpretations),
+        }
+
+    @staticmethod
+    def _evaluation_verdict(
+        revision: CalibrationVersion,
+        hypothesis_id: str,
+        raw_index: int,
+    ) -> str | None:
+        for item in revision.evaluations:
+            if item.get("hypothesis_id") == hypothesis_id and int(item["raw_index"]) == raw_index:
+                if item.get("status", "valid") != "valid":
+                    return None
+                return item.get("verdict")
+        return None
+
+    @staticmethod
+    def _raw_review_verdict(hypothesis: Hypothesis, raw_index: int) -> dict[str, object]:
+        for item in hypothesis.evidence:
+            if int(item["repeat_index"]) != raw_index or item.get("calibration_id"):
+                continue
+            return {
+                "status": item.get("status", "valid"),
+                "verdict": item.get("verdict"),
+                "branch_status": branch_verdict(baseline_evidence(hypothesis))["status"],
+            }
+        return {"status": "not_observed", "verdict": None, "branch_status": branch_verdict(baseline_evidence(hypothesis))["status"]}
+
+    def _restore_withdrawn_interpretation_effects(
+        self,
+        run: MappingRun,
+        revision_id: str,
+        raw_scope: set[int],
+        reason: str,
+    ) -> list[str]:
+        restored: list[str] = []
+        for hypothesis in list(run.hypotheses):
+            evidence = []
+            touched = False
+            for item in hypothesis.evidence:
+                updated_item = dict(item)
+                if updated_item.get("calibration_id") == revision_id and int(updated_item["repeat_index"]) in raw_scope:
+                    updated_item["status"] = CALIBRATION_WITHDRAWN
+                    updated_item["withdrawal_reason"] = reason
+                    touched = True
+                elif updated_item.get("superseded_by") == revision_id and int(updated_item["repeat_index"]) in raw_scope:
+                    updated_item["status"] = "valid"
+                    updated_item.pop("superseded_by", None)
+                    updated_item.pop("supersession_reason", None)
+                    touched = True
+                evidence.append(updated_item)
+            if not touched:
+                continue
+            replacement = hypothesis.with_evidence(tuple(evidence))
+            baseline = baseline_evidence(replacement)
+            baseline_reason = elimination_reason(tuple(baseline))
+            if baseline_reason and replacement.status in ("active", "eliminated"):
+                replacement = replacement.with_status("eliminated", baseline_reason)
+            elif replacement.status == "eliminated" and not baseline_reason:
+                replacement = replacement.with_status(
+                    "active",
+                    f"restored: reviewer revision {revision_id} withdrawn ({reason})",
+                )
+                restored.append(hypothesis.hypothesis_id)
+            run.hypotheses = [
+                replacement if item.hypothesis_id == replacement.hypothesis_id else item
+                for item in run.hypotheses
+            ]
+            self.store.record_hypothesis(replacement)
+        return restored
 
     def reinterpret_observation(
         self,
@@ -458,6 +949,10 @@ class MappingPlatform:
         run = self._run(calibration.run_id)
         if raw_index < 0 or raw_index >= len(run.scans):
             raise ValueError(f"unknown raw observation {raw_index}")
+        if calibration.batch_id is not None:
+            review_batch = self.review_batch(calibration.batch_id)
+            if raw_index not in set(review_batch.raw_indices):
+                raise ValueError(f"raw observation {raw_index} is outside review batch {calibration.batch_id}")
         raw_scan = run.scans[raw_index]
         interpretations = [dict(item) for item in calibration.interpretations if int(item["raw_index"]) != raw_index]
         interpretations.append(
@@ -660,41 +1155,30 @@ class MappingPlatform:
         if calibration.status == "withdrawn":
             return {"run_id": calibration.run_id, "calibration_id": calibration_id, "restored_hypotheses": []}
         run = self._run(calibration.run_id)
-        updated = calibration.with_update(status="withdrawn", withdrawn_at=time.time(), reason=reason)
+        interpretations = []
+        evaluations = []
+        for item in calibration.interpretations:
+            updated_item = dict(item)
+            if updated_item.get("status") != "withdrawn":
+                updated_item["status"] = "withdrawn"
+                updated_item["withdrawal_reason"] = reason
+            interpretations.append(updated_item)
+        for item in calibration.evaluations:
+            updated_item = dict(item)
+            if updated_item.get("status", "valid") == "valid":
+                updated_item["status"] = CALIBRATION_WITHDRAWN
+                updated_item["withdrawal_reason"] = reason
+            evaluations.append(updated_item)
+        updated = calibration.with_update(
+            interpretations=tuple(interpretations),
+            evaluations=tuple(evaluations),
+            status="withdrawn",
+            withdrawn_at=time.time(),
+            reason=reason,
+        )
         self._replace_calibration(updated)
-        restored: list[str] = []
-        for hypothesis in list(run.hypotheses):
-            evidence = []
-            touched = False
-            for item in hypothesis.evidence:
-                updated_item = dict(item)
-                if updated_item.get("calibration_id") == calibration_id:
-                    updated_item["status"] = CALIBRATION_WITHDRAWN
-                    updated_item["withdrawal_reason"] = reason
-                    touched = True
-                elif updated_item.get("superseded_by") == calibration_id:
-                    updated_item["status"] = "valid"
-                    updated_item.pop("superseded_by", None)
-                    touched = True
-                evidence.append(updated_item)
-            if not touched:
-                continue
-            replacement = hypothesis.with_evidence(tuple(evidence))
-            baseline = baseline_evidence(replacement)
-            baseline_reason = elimination_reason(tuple(baseline))
-            if baseline_reason and replacement.status in ("active", "eliminated"):
-                replacement = replacement.with_status("eliminated", baseline_reason)
-            elif replacement.status == "eliminated" and not baseline_reason:
-                replacement = replacement.with_status(
-                    "active",
-                    f"restored: calibration {calibration_id} withdrawn ({reason}); remaining independent evidence insufficient for exclusion",
-                )
-                restored.append(hypothesis.hypothesis_id)
-            run.hypotheses = [
-                replacement if item.hypothesis_id == replacement.hypothesis_id else item
-                for item in run.hypotheses
-            ]
-            self.store.record_hypothesis(replacement)
+        scope = {int(item["raw_index"]) for item in calibration.interpretations}
+        restored = self._restore_withdrawn_interpretation_effects(run, calibration_id, scope, reason)
         self.store.append_event(
             {
                 "type": "calibration_withdrawn",
@@ -781,6 +1265,8 @@ class MappingPlatform:
             "calibrations": [
                 {
                     "calibration_id": calibration.calibration_id,
+                    "batch_id": calibration.batch_id,
+                    "reviewer_id": calibration.reviewer_id,
                     "name": calibration.name,
                     "status": calibration.status,
                     "reason": calibration.reason,
@@ -789,6 +1275,7 @@ class MappingPlatform:
                 }
                 for calibration in run.calibrations
             ],
+            "review_batches": [batch.to_dict() for batch in run.review_batches],
         }
 
     def hypothesis(self, hypothesis_id: str) -> Hypothesis:
@@ -933,6 +1420,8 @@ class MappingPlatform:
         hypothesis = self.hypothesis(hypothesis_id) if hypothesis_id is not None else None
         poses = self.corrected_poses(run_id, hypothesis_id)
         calibration = self.calibration(calibration_id) if calibration_id is not None else None
+        if calibration is not None and calibration.status == "withdrawn":
+            raise ValueError("cannot build from a fully withdrawn revision")
         placement: dict[int, int] = {}
         if calibration is not None:
             for item in calibration.interpretations:
@@ -1010,8 +1499,8 @@ class MappingPlatform:
             closures = [c for c in self.store.load_closures() if c.run_id == run_id]
             hypotheses = [h for h in self.store.load_hypotheses() if h.run_id == run_id]
             plans = [p for p in self.store.load_probe_plans() if p.run_id == run_id]
-            calibrations = self.store.load_calibrations()
-            run_calibrations = [c for c in calibrations if c.run_id == run_id]
-            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, run_calibrations)
+            calibrations = [c for c in self.store.load_calibrations() if c.run_id == run_id]
+            batches = [b for b in self.store.load_review_batches() if b.run_id == run_id]
+            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, calibrations, batches)
             self._loaded.add(run_id)
         return self.runs[run_id]

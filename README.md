@@ -64,6 +64,15 @@ python -m robot_mapping.cli demo ./robot_map_project
 - `withdraw_calibration(calibration_id)` 撤回后来又被撤销的校准：依赖它的判断恢复为旧校准下的结论（包括重新淘汰），依赖它的证据标记为 `calibration_withdrawn`，其他独立证据不受影响；已经构建的地图版本继续保留可查。
 - `decision_trace(run_id)` 的 `calibrations` 段记录校准版本、每条重解释（原观测、解释位置、采集时刻、计划归属、确认状态）和各假设下的评估结果，使每个地图选择都能沿计划、原观测、校准版本和人工确认决定完整追溯。
 
+## 两位评审的同批独立修订
+
+当两位评审需要独立复核同一批定位观测时，系统先通过 `create_review_batch(run_id, raw_indices)` 冻结且只冻结用户明确选择的原始观测范围，并记录这些原始扫描行的 SHA-256 与字节数。后续新增扫描不会进入该批；原始 `scans.jsonl` 始终逐字节追加，不被评审改写。
+
+- `register_reviewer_revision(batch_id, reviewer_id, name)` 为每位评审登记一个独立修订；同一评审不能覆盖自己或他人的修订。两位评审对同一 `raw_index` 给出不同 `interpreted_index` 时，`compare_review_batch(batch_id)` 并列展示原始解释和每个评审来源，并逐位置假设给出各自判定与该分支下的假设状态。提议修订不会写入公共假设证据，因此不会后写覆盖，也不会把同一条观测重复累加支持。
+- `confirm_review_scope(batch_id, revision_id, raw_indices)` 只采用用户明确选择的观测范围；可先确认一半。确认会把同观测的原始有效记录标为 `superseded_by_calibration`，每个原始观测在有效证据中仍只有一份解释。重复调用相同确认是幂等的，不新增支持、不重复登记决定。
+- `withdraw_reviewer_revision(batch_id, revision_id, raw_indices=...)` 撤回指定评审修订中的指定观测；省略 `raw_indices` 才撤回整个修订。撤回只恢复依赖这些修订的判断，其他评审和其他观测的独立证据不受影响。部分撤回后修订状态为 `partially_withdrawn`，剩余提议仍可比较。
+- 保存后重开项目可恢复批次、两位评审修订、已采用决定、撤回记录和未决冲突。`export_review_batch(batch_id)` 写入 `reviews/<batch>/review_export.json`，其中包含每条采用、每条撤回、剩余冲突、评审/修订来源，以及冻结扫描的哈希与当前一致性校验。
+
 ## 测试
 
 ```bash

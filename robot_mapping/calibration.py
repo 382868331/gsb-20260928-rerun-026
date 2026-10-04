@@ -19,7 +19,7 @@ def _counted(record: dict[str, object]) -> bool:
 def baseline_evidence(hypothesis: Hypothesis) -> list[dict[str, object]]:
     """Evidence used while the old calibration stays in force."""
 
-    return [dict(item) for item in hypothesis.evidence if _counted(item)]
+    return [dict(item) for item in hypothesis.evidence if _counted(item) and not item.get("calibration_id")]
 
 
 def calibrated_evidence(
