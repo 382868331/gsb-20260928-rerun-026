@@ -744,18 +744,10 @@ class MappingPlatform:
                     }
                 )
             adopted = [branch for branch in branches if branch["interpretation_status"] == CONFIRMED]
-            live = [
-                branch
-                for branch in branches
-                if branch["interpretation_status"] in (PROPOSED, CONFIRMED)
-                and branch["calibration_status"] == "active"
-            ]
             if len(adopted) == 1:
                 resolution = f"adopted:{adopted[0]['calibration_id']}"
-            elif len(live) >= 2:
-                resolution = "pending"
             else:
-                resolution = "resolved"
+                resolution = "pending"
             conflicts.append(
                 {
                     "raw_index": raw_index,

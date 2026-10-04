@@ -183,6 +183,81 @@ class IndependentReviewerRevisionTest(unittest.TestCase):
             reviewers = {item["reviewer"] for item in reloaded_trace["calibrations"]}
             self.assertEqual(reviewers, {"reviewer-a", "reviewer-b"})
 
+    def test_withdrawn_adoption_does_not_auto_adopt_remaining_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platform = MappingPlatform(directory)
+            _scenario, fold, _distinct, _plan = _eliminated_fold(platform)
+            raw_before = _scan_bytes(platform)
+            revision_a = platform.register_calibration(
+                "similar", "reviewer A revision", reviewer="reviewer-a"
+            )
+            platform.reinterpret_observation(revision_a.calibration_id, 46, 34)
+            platform.reinterpret_observation(revision_a.calibration_id, 47, 35)
+            # confirm only half of the batch first
+            platform.confirm_calibration_interpretation(
+                revision_a.calibration_id, [46], "reviewer A: first reading checked"
+            )
+            # a second reviewer registers a conflicting revision of the same batch
+            revision_b = platform.register_calibration(
+                "similar", "reviewer B revision", reviewer="reviewer-b"
+            )
+            platform.reinterpret_observation(revision_b.calibration_id, 46, 40)
+            platform.reinterpret_observation(revision_b.calibration_id, 47, 41)
+            # withdrawing the adopted revision must not auto-adopt the remaining one
+            platform.withdraw_calibration(revision_a.calibration_id, "reviewer A recalled")
+            comparison = platform.compare_reviewer_conflicts("similar")
+            resolutions = {entry["raw_index"]: entry["resolution"] for entry in comparison["conflicts"]}
+            self.assertEqual(resolutions, {46: "pending", 47: "pending"})
+            for entry in comparison["conflicts"]:
+                self.assertTrue(entry["ambiguity_remains"])
+            # provenance agrees: nothing adopted, reviewer B's readings still proposed
+            provenance = {
+                entry["raw_index"]: entry
+                for entry in platform.decision_trace("similar")["observation_provenance"]
+            }
+            self.assertEqual(provenance[46]["state"], "proposed")
+            self.assertEqual(provenance[47]["state"], "proposed")
+            # a single remaining revision can still be confirmed explicitly, one by one
+            platform.confirm_calibration_interpretation(
+                revision_b.calibration_id, [46], "user adopts reviewer B for raw 46 only"
+            )
+            comparison = platform.compare_reviewer_conflicts("similar")
+            resolutions = {entry["raw_index"]: entry["resolution"] for entry in comparison["conflicts"]}
+            self.assertEqual(resolutions[46], f"adopted:{revision_b.calibration_id}")
+            self.assertEqual(resolutions[47], "pending")
+            # repeated confirmation adds no extra support
+            again = platform.confirm_calibration_interpretation(
+                revision_b.calibration_id, [46], "duplicate confirmation"
+            )
+            self.assertTrue(again["unchanged"])
+            fold_now = platform.hypothesis(fold.hypothesis_id)
+            valid_46 = [
+                item
+                for item in fold_now.evidence
+                if int(item["repeat_index"]) == 46 and item.get("status", "valid") == "valid"
+            ]
+            self.assertEqual(len(valid_46), 1)
+            # save & reopen: adopted, withdrawn and pending states all survive
+            reopened = MappingPlatform(directory)
+            reopened_comparison = reopened.compare_reviewer_conflicts("similar")
+            reopened_resolutions = {
+                entry["raw_index"]: entry["resolution"] for entry in reopened_comparison["conflicts"]
+            }
+            self.assertEqual(reopened_resolutions[46], f"adopted:{revision_b.calibration_id}")
+            self.assertEqual(reopened_resolutions[47], "pending")
+            reloaded_trace = reopened.decision_trace("similar")
+            reloaded_provenance = {
+                entry["raw_index"]: entry for entry in reloaded_trace["observation_provenance"]
+            }
+            self.assertEqual(reloaded_provenance[46]["state"], "adopted")
+            self.assertEqual(reloaded_provenance[47]["state"], "proposed")
+            self.assertEqual(reopened.calibration(revision_a.calibration_id).status, "withdrawn")
+            # raw scans are byte-identical through the whole workflow
+            self.assertEqual(
+                hashlib.sha256(raw_before).hexdigest(),
+                hashlib.sha256(_scan_bytes(reopened)).hexdigest(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
