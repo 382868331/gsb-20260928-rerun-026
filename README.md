@@ -64,6 +64,16 @@ python -m robot_mapping.cli demo ./robot_map_project
 - `withdraw_calibration(calibration_id)` 撤回后来又被撤销的校准：依赖它的判断恢复为旧校准下的结论（包括重新淘汰），依赖它的证据标记为 `calibration_withdrawn`，其他独立证据不受影响；已经构建的地图版本继续保留可查。
 - `decision_trace(run_id)` 的 `calibrations` 段记录校准版本、每条重解释（原观测、解释位置、采集时刻、计划归属、确认状态）和各假设下的评估结果，使每个地图选择都能沿计划、原观测、校准版本和人工确认决定完整追溯。
 
+## 多评审者独立修订
+
+同一批定位观测可以由两位评审者各自独立修订：每位评审者用 `register_calibration(run_id, name, reviewer=...)` 登记自己的修订版本，再在各自版本内 `reinterpret_observation` 给出对同一批原始观测的不同位置解释。
+
+- 同一修订版本内不允许把同一条原始观测静默改写成冲突位置（后写覆盖）；不同意见必须登记为另一评审者的独立版本，两个分支始终并列保留。
+- `compare_reviewer_conflicts(run_id)` 对每条被读出不同位置的原始观测并列比较各修订分支：逐假设给出该位置假设下的闭环判断（旧判定 vs 新判定），在用户明确选择前保持 `pending`，不合并、不覆盖。
+- 采用范围只来自用户显式确认：`confirm_calibration_interpretation` 把所选观测的旧解释（包括另一修订中已确认的解释）标记为 `superseded_by_calibration`，同一条原始观测永远只有一份有效支持；重复确认同一范围是幂等的，不会累加支持。
+- 撤回某位评审者的修订（`withdraw_calibration`）会将其全部解释标记为 `withdrawn`、恢复依赖它的判断，另一评审者的待决解释不受影响；已撤回的版本不能再确认。
+- `decision_trace(run_id)` 的 `observation_provenance` 段逐条导出每条被修订观测的来源（修订版本、评审者、解释位置、状态），区分 `adopted`、`proposed`、`pending_conflict` 与 `withdrawn`；保存重开后待决观测与既有决定完整恢复，原始扫描文件逐字节不变。
+
 ## 测试
 
 ```bash

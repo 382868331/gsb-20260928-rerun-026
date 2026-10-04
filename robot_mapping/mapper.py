@@ -8,6 +8,7 @@ from .calibration import (
     CALIBRATION_WITHDRAWN,
     CONFIRMED,
     PROPOSED,
+    SUPERSEDED,
     baseline_evidence,
     branch_verdict,
     calibrated_evidence,
@@ -413,14 +414,19 @@ class MappingPlatform:
                 self.store.record_probe_plan(updated_plan)
         return {"run_id": run_id, "withdrawn_index": repeat_index, "restored_hypotheses": restored}
 
-    def register_calibration(self, run_id: str, name: str, reason: str = "") -> CalibrationVersion:
-        """Register a new sensor calibration revision without touching raw data or the map."""
+    def register_calibration(self, run_id: str, name: str, reason: str = "", reviewer: str = "") -> CalibrationVersion:
+        """Register a new sensor calibration revision without touching raw data or the map.
+
+        ``reviewer`` identifies who owns the revision so two reviewers can revise
+        the same batch of observations independently, each in their own version.
+        """
 
         run = self._run(run_id)
         calibration = CalibrationVersion(
             calibration_id=new_id("cal"),
             run_id=run_id,
             name=name,
+            reviewer=reviewer,
             reason=reason,
         )
         run.calibrations.append(calibration)
@@ -431,6 +437,7 @@ class MappingPlatform:
                 "run_id": run_id,
                 "calibration_id": calibration.calibration_id,
                 "name": name,
+                "reviewer": reviewer,
                 "reason": reason,
             }
         )
@@ -459,7 +466,28 @@ class MappingPlatform:
         if raw_index < 0 or raw_index >= len(run.scans):
             raise ValueError(f"unknown raw observation {raw_index}")
         raw_scan = run.scans[raw_index]
-        interpretations = [dict(item) for item in calibration.interpretations if int(item["raw_index"]) != raw_index]
+        existing = next(
+            (dict(item) for item in calibration.interpretations if int(item["raw_index"]) == raw_index),
+            None,
+        )
+        if existing is not None:
+            if int(existing["interpreted_index"]) == int(interpreted_index):
+                return {
+                    "run_id": run.run_id,
+                    "calibration_id": calibration_id,
+                    "raw_index": raw_index,
+                    "interpreted_index": int(interpreted_index),
+                    "collected_at": raw_scan.timestamp,
+                    "plan_id": existing.get("plan_id"),
+                    "hypothesis_results": [],
+                    "unchanged": True,
+                }
+            raise ValueError(
+                f"raw observation {raw_index} already has a conflicting interpretation in revision "
+                f"{calibration_id}; register the dissenting reading as a separate reviewer revision "
+                "so both branches stay comparable side by side"
+            )
+        interpretations = [dict(item) for item in calibration.interpretations]
         interpretations.append(
             {
                 "raw_index": raw_index,
@@ -562,11 +590,28 @@ class MappingPlatform:
 
         calibration = self.calibration(calibration_id)
         run = self._run(calibration.run_id)
-        wanted = {int(index) for index in raw_indices}
+        if calibration.status == "withdrawn":
+            raise ValueError("cannot confirm interpretations of a withdrawn calibration")
+        requested = {int(index) for index in raw_indices}
+        wanted = set(requested)
         available = {int(item["raw_index"]) for item in calibration.interpretations}
         unknown = wanted - available
         if unknown:
             raise ValueError(f"no reinterpretation for raw observations {sorted(unknown)}")
+        already = {
+            int(item["raw_index"])
+            for item in calibration.interpretations
+            if item.get("status") == CONFIRMED
+        }
+        wanted -= already
+        if not wanted:
+            return {
+                "run_id": run.run_id,
+                "calibration_id": calibration_id,
+                "confirmed_raw_indices": sorted(requested & already),
+                "affected_hypotheses": [],
+                "unchanged": True,
+            }
         interpretations = []
         for item in calibration.interpretations:
             updated_item = dict(item)
@@ -582,6 +627,21 @@ class MappingPlatform:
             evaluations.append(updated_item)
         updated = calibration.with_update(interpretations=tuple(interpretations), evaluations=tuple(evaluations))
         self._replace_calibration(updated)
+
+        for other in list(run.calibrations):
+            if other.calibration_id == calibration_id or other.status == "withdrawn":
+                continue
+            other_interpretations = []
+            other_changed = False
+            for item in other.interpretations:
+                updated_item = dict(item)
+                if int(updated_item["raw_index"]) in wanted and updated_item.get("status") == CONFIRMED:
+                    updated_item["status"] = SUPERSEDED
+                    updated_item["superseded_by"] = calibration_id
+                    other_changed = True
+                other_interpretations.append(updated_item)
+            if other_changed:
+                self._replace_calibration(other.with_update(interpretations=tuple(other_interpretations)))
 
         affected: list[str] = []
         for hypothesis in list(run.hypotheses):
@@ -649,6 +709,63 @@ class MappingPlatform:
             "affected_hypotheses": affected,
         }
 
+    def compare_reviewer_conflicts(self, run_id: str) -> dict[str, object]:
+        """Compare, side by side, conflicting reviewer revisions of the same raw observations.
+
+        Each revision keeps its own interpretation; nothing is overwritten or
+        merged. For every raw observation read differently by two or more
+        revisions, each branch shows the per-hypothesis closure judgment under
+        that reading, and the entry stays ``pending`` until the user explicitly
+        confirms one revision's scope.
+        """
+
+        run = self._run(run_id)
+        by_raw: dict[int, list[tuple[CalibrationVersion, dict[str, object]]]] = {}
+        for calibration in run.calibrations:
+            for item in calibration.interpretations:
+                by_raw.setdefault(int(item["raw_index"]), []).append((calibration, item))
+        conflicts = []
+        for raw_index in sorted(by_raw):
+            entries = by_raw[raw_index]
+            distinct = {int(item["interpreted_index"]) for _, item in entries}
+            if len(entries) < 2 or len(distinct) < 2:
+                continue
+            branches = []
+            for calibration, item in entries:
+                comparison = compare_branches(run.hypotheses, calibration)
+                branches.append(
+                    {
+                        "calibration_id": calibration.calibration_id,
+                        "reviewer": calibration.reviewer,
+                        "calibration_status": calibration.status,
+                        "interpreted_index": int(item["interpreted_index"]),
+                        "interpretation_status": item.get("status", PROPOSED),
+                        "hypotheses": comparison["hypotheses"],
+                    }
+                )
+            adopted = [branch for branch in branches if branch["interpretation_status"] == CONFIRMED]
+            live = [
+                branch
+                for branch in branches
+                if branch["interpretation_status"] in (PROPOSED, CONFIRMED)
+                and branch["calibration_status"] == "active"
+            ]
+            if len(adopted) == 1:
+                resolution = f"adopted:{adopted[0]['calibration_id']}"
+            elif len(live) >= 2:
+                resolution = "pending"
+            else:
+                resolution = "resolved"
+            conflicts.append(
+                {
+                    "raw_index": raw_index,
+                    "branches": branches,
+                    "resolution": resolution,
+                    "ambiguity_remains": resolution == "pending",
+                }
+            )
+        return {"run_id": run_id, "conflicts": conflicts}
+
     def withdraw_calibration(self, calibration_id: str, reason: str = "calibration revision withdrawn") -> dict[str, object]:
         """Withdraw a revision: restore judgments that depended on it only.
 
@@ -660,7 +777,21 @@ class MappingPlatform:
         if calibration.status == "withdrawn":
             return {"run_id": calibration.run_id, "calibration_id": calibration_id, "restored_hypotheses": []}
         run = self._run(calibration.run_id)
-        updated = calibration.with_update(status="withdrawn", withdrawn_at=time.time(), reason=reason)
+        interpretations = tuple(
+            {**item, "status": "withdrawn", "withdrawal_reason": reason}
+            for item in calibration.interpretations
+        )
+        evaluations = tuple(
+            {**item, "status": CALIBRATION_WITHDRAWN, "withdrawal_reason": reason}
+            for item in calibration.evaluations
+        )
+        updated = calibration.with_update(
+            interpretations=interpretations,
+            evaluations=evaluations,
+            status="withdrawn",
+            withdrawn_at=time.time(),
+            reason=reason,
+        )
         self._replace_calibration(updated)
         restored: list[str] = []
         for hypothesis in list(run.hypotheses):
@@ -782,6 +913,7 @@ class MappingPlatform:
                 {
                     "calibration_id": calibration.calibration_id,
                     "name": calibration.name,
+                    "reviewer": calibration.reviewer,
                     "status": calibration.status,
                     "reason": calibration.reason,
                     "interpretations": list(calibration.interpretations),
@@ -789,7 +921,52 @@ class MappingPlatform:
                 }
                 for calibration in run.calibrations
             ],
+            "observation_provenance": self._observation_provenance(run),
         }
+
+    @staticmethod
+    def _observation_provenance(run: MappingRun) -> list[dict[str, object]]:
+        """Per raw observation: which revision read it where and what was adopted.
+
+        Every adopted, still-pending and withdrawn reading keeps its source
+        (revision and reviewer) so an export explains each map decision without
+        collapsing conflicts or double-counting supports.
+        """
+
+        by_raw: dict[int, list[dict[str, object]]] = {}
+        for calibration in run.calibrations:
+            for item in calibration.interpretations:
+                by_raw.setdefault(int(item["raw_index"]), []).append(
+                    {
+                        "calibration_id": calibration.calibration_id,
+                        "reviewer": calibration.reviewer,
+                        "calibration_status": calibration.status,
+                        "interpreted_index": int(item["interpreted_index"]),
+                        "status": item.get("status", PROPOSED),
+                        "plan_id": item.get("plan_id"),
+                        "collected_at": item.get("collected_at"),
+                    }
+                )
+        provenance = []
+        for raw_index in sorted(by_raw):
+            entries = by_raw[raw_index]
+            statuses = {entry["status"] for entry in entries}
+            live = [
+                entry
+                for entry in entries
+                if entry["status"] in (PROPOSED, CONFIRMED) and entry["calibration_status"] == "active"
+            ]
+            live_positions = {entry["interpreted_index"] for entry in live}
+            if CONFIRMED in statuses:
+                state = "adopted"
+            elif not live:
+                state = "withdrawn"
+            elif len(live_positions) >= 2:
+                state = "pending_conflict"
+            else:
+                state = "proposed"
+            provenance.append({"raw_index": raw_index, "state": state, "entries": entries})
+        return provenance
 
     def hypothesis(self, hypothesis_id: str) -> Hypothesis:
         for run in self.runs.values():

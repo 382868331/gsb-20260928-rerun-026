@@ -289,6 +289,7 @@ class CalibrationVersion:
     calibration_id: str
     run_id: str
     name: str
+    reviewer: str = ""
     interpretations: tuple[dict[str, Any], ...] = ()
     evaluations: tuple[dict[str, Any], ...] = ()
     status: CalibrationStatus = "active"
@@ -308,6 +309,7 @@ class CalibrationVersion:
             self.calibration_id,
             self.run_id,
             self.name,
+            self.reviewer,
             self.interpretations if interpretations is None else interpretations,
             self.evaluations if evaluations is None else evaluations,
             self.status if status is None else status,
@@ -321,6 +323,7 @@ class CalibrationVersion:
             "calibration_id": self.calibration_id,
             "run_id": self.run_id,
             "name": self.name,
+            "reviewer": self.reviewer,
             "interpretations": list(self.interpretations),
             "evaluations": list(self.evaluations),
             "status": self.status,
@@ -335,6 +338,7 @@ class CalibrationVersion:
             calibration_id=data["calibration_id"],
             run_id=data["run_id"],
             name=data.get("name", data["calibration_id"]),
+            reviewer=data.get("reviewer", ""),
             interpretations=tuple(data.get("interpretations", [])),
             evaluations=tuple(data.get("evaluations", [])),
             status=data.get("status", "active"),
