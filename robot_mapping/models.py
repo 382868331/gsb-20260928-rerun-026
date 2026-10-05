@@ -275,6 +275,67 @@ class ProbePlan:
 
 
 @dataclass(frozen=True)
+class ReviewPlan:
+    review_plan_id: str
+    run_id: str
+    ambiguity_scope: str
+    candidate_ids: tuple[str, ...]
+    ambiguity_pairs: tuple[tuple[str, str], ...]
+    observations: tuple[dict[str, Any], ...]
+    review_budget: int
+    comparison: dict[str, Any]
+    feedback: tuple[dict[str, Any], ...] = ()
+    created_at: float = field(default_factory=time.time)
+    reason: str = ""
+
+    def with_feedback(self, feedback: tuple[dict[str, Any], ...], comparison: dict[str, Any]) -> "ReviewPlan":
+        return ReviewPlan(
+            self.review_plan_id,
+            self.run_id,
+            self.ambiguity_scope,
+            self.candidate_ids,
+            self.ambiguity_pairs,
+            self.observations,
+            self.review_budget,
+            comparison,
+            feedback,
+            self.created_at,
+            self.reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "review_plan_id": self.review_plan_id,
+            "run_id": self.run_id,
+            "ambiguity_scope": self.ambiguity_scope,
+            "candidate_ids": list(self.candidate_ids),
+            "ambiguity_pairs": [list(pair) for pair in self.ambiguity_pairs],
+            "observations": list(self.observations),
+            "review_budget": self.review_budget,
+            "comparison": self.comparison,
+            "feedback": list(self.feedback),
+            "created_at": self.created_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ReviewPlan":
+        return cls(
+            review_plan_id=data["review_plan_id"],
+            run_id=data["run_id"],
+            ambiguity_scope=data.get("ambiguity_scope", ""),
+            candidate_ids=tuple(data.get("candidate_ids", [])),
+            ambiguity_pairs=tuple(tuple(pair) for pair in data.get("ambiguity_pairs", [])),
+            observations=tuple(data.get("observations", [])),
+            review_budget=int(data["review_budget"]),
+            comparison=dict(data.get("comparison", {})),
+            feedback=tuple(data.get("feedback", [])),
+            created_at=float(data["created_at"]),
+            reason=data.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
 class CalibrationVersion:
     """A sensor calibration revision.
 

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .models import CalibrationVersion, Hypothesis, LoopClosure, PoseRecord, ProbePlan, Scan2D
+from .models import CalibrationVersion, Hypothesis, LoopClosure, PoseRecord, ProbePlan, ReviewPlan, Scan2D
 
 
 class ProjectStore:
@@ -70,6 +70,17 @@ class ProjectStore:
 
     def record_probe_plan(self, plan: ProbePlan) -> None:
         self.append_event({"type": "probe_plan", "probe_plan": plan.to_dict()})
+
+    def load_review_plans(self) -> list[ReviewPlan]:
+        latest: dict[str, ReviewPlan] = {}
+        for item in self._read_jsonl(self.events_path):
+            if "review_plan" in item:
+                plan = ReviewPlan.from_dict(item["review_plan"])
+                latest[plan.review_plan_id] = plan
+        return [latest[key] for key in sorted(latest)]
+
+    def record_review_plan(self, plan: ReviewPlan) -> None:
+        self.append_event({"type": "review_plan", "review_plan": plan.to_dict()})
 
     def load_calibrations(self) -> list[CalibrationVersion]:
         latest: dict[str, CalibrationVersion] = {}

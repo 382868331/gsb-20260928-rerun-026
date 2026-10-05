@@ -74,6 +74,16 @@ python -m robot_mapping.cli demo ./robot_map_project
 - 撤回某位评审者的修订（`withdraw_calibration`）会将其全部解释标记为 `withdrawn`、恢复依赖它的判断，另一评审者的待决解释不受影响；已撤回的版本不能再确认。
 - `decision_trace(run_id)` 的 `observation_provenance` 段逐条导出每条被修订观测的来源（修订版本、评审者、解释位置、状态），区分 `adopted`、`proposed`、`pending_conflict` 与 `withdrawn`；保存重开后待决观测与既有决定完整恢复，原始扫描文件逐字节不变。
 
+## 复核证据覆盖规划
+
+对尚未确认的解释，可调用 `create_review_plan(run_id, ambiguity_scope, review_budget, candidate_ids=..., observations=..., ambiguity_pairs=...)` 规划人工或外部复核：
+
+- `ambiguity_pairs` 明确本轮要消除的互斥候选歧义；`review_budget` 是可用复核次数上限。默认从候选闭环及其相邻对齐帧提取原始扫描，也可以显式给出观测及其 `candidate_ids`、`source_id`、`relevance_known`。
+- 多个解释引用同一扫描时，该扫描在候选集合中只出现一次；复核它不会为每个引用重复累加支持。只有只链接到互斥候选一方的扫描才计入该冲突对的区分覆盖；同时链接双方的共享扫描不能区分二者。
+- 计划同时比较 `maximum_conflict_coverage`（优先覆盖最多冲突，再取最小组合）和 `balanced_source_coverage`（在预算内优先均衡来源，再比较冲突覆盖）。`relevance_known=False` 表示来源相关性未知，覆盖规划会保留该限制且不把它计为可区分证据。
+- `record_review_feedback(review_plan_id, observation_id, verdict, candidate_id=...)` 记录实际复核结果，`verdict` 可为 `support`、`refute` 或 `insufficient`。反馈按“扫描 × 候选”作用于对应候选；`support` 不自动反驳其他候选，`insufficient` 不增加或减少证据，`refute` 后剩余唯一解释也仍不会自动采用。
+- 部分反馈会消耗预算并基于未复核扫描重算剩余冲突覆盖；计划、反馈和限制写入 `decision_trace(run_id)` 的 `review_plans`，保存重开后可恢复。采用决定仍只能通过 `confirm_hypothesis` 等显式用户操作作出，复核计划本身不改变假设状态、公共地图或已接受闭环。
+
 ## 测试
 
 ```bash

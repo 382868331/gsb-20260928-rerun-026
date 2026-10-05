@@ -30,10 +30,12 @@ from .models import (
     LoopClosure,
     PoseRecord,
     ProbePlan,
+    ReviewPlan,
     Scan2D,
     new_id,
 )
 from .occupancy import OccupancyGrid
+from .reviews import INSUFFICIENT, REFUTE, SUPPORT, compare_review_plans
 from .storage import ProjectStore
 
 
@@ -46,6 +48,7 @@ class MappingRun:
     hypotheses: list[Hypothesis]
     probe_plans: list[ProbePlan]
     calibrations: list[CalibrationVersion]
+    review_plans: list[ReviewPlan]
 
 
 class MappingPlatform:
@@ -56,14 +59,14 @@ class MappingPlatform:
 
     def create_run(self, run_id: str) -> MappingRun:
         self.store.run_dir(run_id)
-        run = MappingRun(run_id, [], [], [], [], [], [])
+        run = MappingRun(run_id, [], [], [], [], [], [], [])
         self.runs[run_id] = run
         self._loaded.add(run_id)
         self.store.append_event({"type": "run_created", "run_id": run_id})
         return run
 
     def add_observation(self, run_id: str, pose: Pose, points: list[tuple[float, float]], sensor_id: str = "lidar_2d") -> None:
-        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], []))
+        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], [], []))
         self._loaded.add(run_id)
         index = len(run.scans)
         timestamp = float(index)
@@ -225,6 +228,183 @@ class MappingPlatform:
                 for target_index in plan.target_indices
             ],
         }
+
+    def create_review_plan(
+        self,
+        run_id: str,
+        ambiguity_scope: str,
+        review_budget: int,
+        candidate_ids: list[str] | None = None,
+        observations: list[dict[str, object]] | None = None,
+        ambiguity_pairs: list[tuple[str, str]] | None = None,
+        preferred_strategy: str = "maximum_conflict_coverage",
+        reason: str = "",
+    ) -> ReviewPlan:
+        """Plan evidence re-checks for unresolved, mutually exclusive explanations.
+
+        The plan is based only on original observation sharing. Re-checking one
+        shared scan is represented once, and a plan never adds support or
+        changes a hypothesis; adoption remains a separate user decision.
+        """
+
+        run = self._run(run_id)
+        unresolved = candidate_ids or [hypothesis.hypothesis_id for hypothesis in run.hypotheses if hypothesis.status == "active"]
+        unresolved = tuple(unresolved)
+        if len(unresolved) < 2:
+            raise ValueError("review coverage requires at least two unresolved candidates")
+        known = {hypothesis.hypothesis_id for hypothesis in run.hypotheses}
+        unknown = [candidate_id for candidate_id in unresolved if candidate_id not in known]
+        if unknown:
+            raise ValueError(f"unknown review candidates {unknown}")
+        review_observations = observations if observations is not None else self._closure_review_observations(run, unresolved)
+        comparison = compare_review_plans(
+            unresolved,
+            review_observations,
+            review_budget,
+            tuple(ambiguity_pairs) if ambiguity_pairs is not None else None,
+        )
+        for plan in comparison["plans"]:
+            plan["selected"] = plan["strategy"] == preferred_strategy
+        if not any(plan["selected"] for plan in comparison["plans"]):
+            raise ValueError("preferred_strategy must be maximum_conflict_coverage or balanced_source_coverage")
+        selected = next(plan for plan in comparison["plans"] if plan["selected"])
+        comparison["selected_observation_ids"] = selected["observation_ids"]
+        comparison["remaining_budget"] = review_budget
+        plan = ReviewPlan(
+            review_plan_id=new_id("review"),
+            run_id=run_id,
+            ambiguity_scope=ambiguity_scope,
+            candidate_ids=unresolved,
+            ambiguity_pairs=tuple(tuple(pair) for pair in comparison["ambiguity_pairs"]),
+            observations=tuple(review_observations),
+            review_budget=review_budget,
+            comparison=comparison,
+            reason=reason,
+        )
+        run.review_plans.append(plan)
+        self.store.record_review_plan(plan)
+        self.store.append_event(
+            {
+                "type": "review_plan_created",
+                "run_id": run_id,
+                "review_plan_id": plan.review_plan_id,
+                "candidate_ids": list(unresolved),
+                "review_budget": review_budget,
+                "selected_observation_ids": comparison["selected_observation_ids"],
+            }
+        )
+        return plan
+
+    @staticmethod
+    def _closure_review_observations(run: MappingRun, candidate_ids: tuple[str, ...]) -> list[dict[str, object]]:
+        by_scan: dict[int, dict[str, object]] = {}
+        for hypothesis in run.hypotheses:
+            if hypothesis.hypothesis_id not in candidate_ids or not hypothesis.closure_ids:
+                continue
+            for closure_id in hypothesis.closure_ids:
+                closure = next(item for item in run.closures if item.closure_id == closure_id)
+                scan_indices = {closure.anchor_index, closure.repeat_index}
+                for alignment in closure.evidence.get("alignments", []):
+                    scan_indices.add(int(alignment["anchor_index"]))
+                    scan_indices.add(int(alignment["repeat_index"]))
+                for scan_index in scan_indices:
+                    if scan_index < 0 or scan_index >= len(run.scans):
+                        continue
+                    scan = run.scans[scan_index]
+                    item = by_scan.setdefault(
+                        scan_index,
+                        {
+                            "observation_id": f"scan:{scan_index}",
+                            "scan_index": scan_index,
+                            "scan_id": scan.scan_id,
+                            "source_id": scan.sensor_id,
+                            "relevance_known": True,
+                            "candidate_ids": [],
+                        },
+                    )
+                    if hypothesis.hypothesis_id not in item["candidate_ids"]:
+                        item["candidate_ids"].append(hypothesis.hypothesis_id)
+        return [by_scan[index] for index in sorted(by_scan)]
+
+    def record_review_feedback(
+        self,
+        review_plan_id: str,
+        observation_id: object,
+        verdict: str,
+        candidate_id: str | None = None,
+        note: str = "",
+    ) -> dict[str, object]:
+        """Record one scoped review result without adopting the remaining explanation."""
+
+        if verdict not in (SUPPORT, REFUTE, INSUFFICIENT):
+            raise ValueError("review verdict must be support, refute, or insufficient")
+        plan = self.review_plan(review_plan_id)
+        selected_ids = set(plan.comparison.get("selected_observation_ids", []))
+        reviewed_ids = {item["observation_id"] for item in plan.feedback}
+        if observation_id not in selected_ids:
+            raise ValueError("feedback is outside the selected minimum review set")
+        if observation_id in reviewed_ids:
+            raise ValueError("a selected scan can only be reviewed once; repeated references do not add support")
+        if len(plan.feedback) >= plan.review_budget:
+            raise ValueError("review budget exhausted")
+        observation = next(item for item in plan.observations if item["observation_id"] == observation_id)
+        linked = list(observation.get("candidate_ids", ()))
+        target_candidate = candidate_id
+        if verdict != INSUFFICIENT:
+            if target_candidate is None:
+                if len(linked) != 1:
+                    raise ValueError("feedback for a shared scan must name the candidate it concerns")
+                target_candidate = linked[0]
+            if target_candidate not in plan.candidate_ids or target_candidate not in linked:
+                raise ValueError("review feedback does not correspond to this candidate/scan sharing relation")
+        feedback_item = {
+            "observation_id": observation_id,
+            "scan_index": observation.get("scan_index"),
+            "scan_id": observation.get("scan_id"),
+            "source_id": observation.get("source_id"),
+            "candidate_id": target_candidate,
+            "verdict": verdict,
+            "note": note,
+        }
+        feedback = tuple(list(plan.feedback) + [feedback_item])
+        reviewed = {item["observation_id"] for item in feedback}
+        refuted = {item["candidate_id"] for item in feedback if item["verdict"] == REFUTE}
+        remaining_observations = [item for item in plan.observations if item["observation_id"] not in reviewed]
+        remaining_budget = plan.review_budget - len(feedback)
+        comparison = compare_review_plans(
+            plan.candidate_ids,
+            remaining_observations,
+            max(1, remaining_budget),
+            tuple(tuple(pair) for pair in plan.ambiguity_pairs),
+            feedback,
+        ) if remaining_budget else {
+            "candidate_ids": list(plan.candidate_ids),
+            "review_budget": 0,
+            "ambiguity_pairs": [list(pair) for pair in plan.ambiguity_pairs],
+            "plans": [],
+            "recommended_strategy": None,
+            "remaining_budget": 0,
+            "refuted_candidate_ids": sorted(refuted),
+            "adoption": "requires explicit user decision",
+        }
+        comparison["used_budget"] = len(feedback)
+        comparison["remaining_budget"] = remaining_budget
+        updated_plan = plan.with_feedback(feedback, comparison)
+        run = self._run(plan.run_id)
+        run.review_plans = [updated_plan if item.review_plan_id == review_plan_id else item for item in run.review_plans]
+        self.store.record_review_plan(updated_plan)
+        self.store.append_event(
+            {
+                "type": "review_feedback_recorded",
+                "run_id": plan.run_id,
+                "review_plan_id": review_plan_id,
+                "observation_id": observation_id,
+                "candidate_id": target_candidate,
+                "verdict": verdict,
+                "remaining_budget": remaining_budget,
+            }
+        )
+        return feedback_item
 
     def feed_observation_to_hypotheses(
         self,
@@ -877,6 +1057,19 @@ class MappingPlatform:
     def probe_plans_for(self, run_id: str) -> list[ProbePlan]:
         return list(self._run(run_id).probe_plans)
 
+    def review_plan(self, review_plan_id: str) -> ReviewPlan:
+        for run in self.runs.values():
+            for plan in run.review_plans:
+                if plan.review_plan_id == review_plan_id:
+                    return plan
+        for plan in self.store.load_review_plans():
+            if plan.review_plan_id == review_plan_id:
+                return plan
+        raise KeyError(f"unknown review plan: {review_plan_id}")
+
+    def review_plans_for(self, run_id: str) -> list[ReviewPlan]:
+        return list(self._run(run_id).review_plans)
+
     def decision_trace(self, run_id: str) -> dict[str, object]:
         """Replay plans, actual probes, exclusions, withdrawals and the final pick."""
 
@@ -893,6 +1086,20 @@ class MappingPlatform:
                     "executions": list(plan.executions),
                 }
                 for plan in run.probe_plans
+            ],
+            "review_plans": [
+                {
+                    "review_plan_id": plan.review_plan_id,
+                    "ambiguity_scope": plan.ambiguity_scope,
+                    "candidate_ids": list(plan.candidate_ids),
+                    "ambiguity_pairs": [list(pair) for pair in plan.ambiguity_pairs],
+                    "observations": list(plan.observations),
+                    "review_budget": plan.review_budget,
+                    "comparison": plan.comparison,
+                    "feedback": list(plan.feedback),
+                    "reason": plan.reason,
+                }
+                for plan in run.review_plans
             ],
             "hypotheses": [
                 {
@@ -1192,8 +1399,9 @@ class MappingPlatform:
             closures = [c for c in self.store.load_closures() if c.run_id == run_id]
             hypotheses = [h for h in self.store.load_hypotheses() if h.run_id == run_id]
             plans = [p for p in self.store.load_probe_plans() if p.run_id == run_id]
+            review_plans = [p for p in self.store.load_review_plans() if p.run_id == run_id]
             calibrations = self.store.load_calibrations()
             run_calibrations = [c for c in calibrations if c.run_id == run_id]
-            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, run_calibrations)
+            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, run_calibrations, review_plans)
             self._loaded.add(run_id)
         return self.runs[run_id]
