@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from robot_mapping.mapper import MappingPlatform
+from robot_mapping.review_planning import ReviewCandidate, feedback_coverage, review_coverage_plan
 
 from test_calibration import _eliminated_fold
 
@@ -15,6 +16,116 @@ def _scan_bytes(platform: MappingPlatform, run_id: str = "similar") -> bytes:
 
 
 class IndependentReviewerRevisionTest(unittest.TestCase):
+    def test_shared_scan_has_one_review_but_balanced_sources_is_limited_when_unknown(self) -> None:
+        candidates = [
+            ReviewCandidate("a46", "raw:46", 46, "reviewer-a", source_relevance_known=False),
+            ReviewCandidate("b46", "raw:46", 46, "reviewer-b", source_relevance_known=False),
+            ReviewCandidate("a47", "raw:47", 47, "reviewer-a", source_relevance_known=False),
+            ReviewCandidate("b47", "raw:47", 47, "reviewer-b", source_relevance_known=False),
+            ReviewCandidate("c47", "raw:47", 47, "reviewer-c", source_relevance_known=False),
+        ]
+        plan = review_coverage_plan(candidates, budget=1)
+        strategies = {item["strategy"]: item for item in plan["plans"]}
+        self.assertEqual(strategies["max_conflicts"]["scan_ids"], [47])
+        self.assertEqual(strategies["max_conflicts"]["conflicts_covered"], 3)
+        self.assertEqual(strategies["balanced_sources"]["scan_ids"], [47])
+        self.assertTrue(all("source relevance is unknown" in item for item in plan["limitations"]))
+
+    def test_budgeted_plans_compare_max_conflicts_against_source_balance(self) -> None:
+        candidates = [
+            *[ReviewCandidate(f"{source}:10", "raw:10", 10, source) for source in ("a", "b", "c")],
+            *[ReviewCandidate(f"{source}:20", "raw:20", 20, source) for source in ("a", "b", "c")],
+            *[ReviewCandidate(f"{source}:30", "raw:30", 30, source) for source in ("d", "e", "f")],
+        ]
+        plan = review_coverage_plan(candidates, budget=2)
+        strategies = {item["strategy"]: item for item in plan["plans"]}
+        self.assertEqual(strategies["max_conflicts"]["scan_ids"], [10, 20])
+        self.assertEqual(strategies["max_conflicts"]["conflicts_covered"], 6)
+        self.assertEqual(strategies["balanced_sources"]["scan_ids"], [10, 30])
+        self.assertEqual(strategies["balanced_sources"]["conflicts_covered"], 6)
+        self.assertFalse(strategies["balanced_sources"]["complete"])
+
+    def test_partial_review_feedback_never_adopts_the_remaining_candidate(self) -> None:
+        candidates = [
+            ReviewCandidate("a46", "raw:46", 46, "reviewer-a"),
+            ReviewCandidate("b46", "raw:46", 46, "reviewer-b"),
+        ]
+        coverage = feedback_coverage(candidates, {"a46": "refute", "b46": "insufficient"})
+        self.assertEqual(coverage["distinguished_conflicts"], [["a46", "b46"]])
+        self.assertEqual(coverage["pending_conflicts"], [])
+        self.assertEqual(coverage["candidate_states"]["b46"], "insufficient")
+        self.assertEqual(coverage["adoption"], "requires_explicit_user_decision")
+
+    def test_platform_plans_shared_scans_within_budget_and_persists_partial_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platform = MappingPlatform(directory)
+            _scenario, fold, _distinct, _plan = _eliminated_fold(platform)
+            revision_a = platform.register_calibration("similar", "reviewer A", reviewer="reviewer-a")
+            revision_b = platform.register_calibration("similar", "reviewer B", reviewer="reviewer-b")
+            revision_c = platform.register_calibration("similar", "reviewer C", reviewer="reviewer-c")
+            platform.reinterpret_observation(revision_a.calibration_id, 46, 34)
+            platform.reinterpret_observation(revision_b.calibration_id, 46, 40)
+            platform.reinterpret_observation(revision_a.calibration_id, 47, 35)
+            platform.reinterpret_observation(revision_b.calibration_id, 47, 41)
+            platform.reinterpret_observation(revision_c.calibration_id, 47, 42)
+
+            review_plan = platform.plan_review_coverage(
+                "similar",
+                "reviewer conflict on raw scans 46 and 47",
+                review_budget=1,
+                raw_indices=[46, 47],
+                reason="one follow-up review available",
+            )
+            strategies = {item["strategy"]: item for item in review_plan.strategies}
+            self.assertEqual(strategies["max_conflicts"]["scan_ids"], [47])
+            self.assertEqual(strategies["max_conflicts"]["conflicts_covered"], 3)
+            self.assertEqual(strategies["balanced_sources"]["scan_ids"], [47])
+            self.assertTrue(review_plan.limitations)
+            self.assertEqual(review_plan.selected_scan_ids, (47,))
+            self.assertEqual(review_plan.budget, 1)
+
+            platform.record_review_feedback(
+                review_plan.review_plan_id,
+                47,
+                revision_a.calibration_id,
+                "refute",
+                "position 35 is ruled out",
+            )
+            result = platform.record_review_feedback(
+                review_plan.review_plan_id,
+                47,
+                revision_b.calibration_id,
+                "refute",
+                "position 41 is ruled out",
+            )
+            self.assertEqual(result["coverage"]["adoption"], "requires_explicit_user_decision")
+            self.assertEqual(
+                result["coverage"]["ambiguity_states"],
+                [
+                    {"ambiguity_id": "raw:46", "state": "pending_evidence"},
+                    {"ambiguity_id": "raw:47", "state": "single_remaining_requires_user_adoption"},
+                ],
+            )
+            # feedback is not calibration confirmation: no interpretation or map is adopted
+            stored_a = platform.calibration(revision_a.calibration_id)
+            self.assertTrue(all(item["status"] == "proposed" for item in stored_a.interpretations))
+            self.assertEqual(platform.hypothesis(fold.hypothesis_id).status, "eliminated")
+            self.assertEqual(platform.build_map("similar", "still_common")["accepted_closures"], [])
+            with self.assertRaises(ValueError):
+                platform.record_review_feedback(
+                    review_plan.review_plan_id, 46, revision_b.calibration_id, "support"
+                )
+
+            reopened = MappingPlatform(directory)
+            restored = reopened.review_plan(review_plan.review_plan_id)
+            self.assertEqual(restored.selected_scan_ids, (47,))
+            self.assertEqual(restored.feedback[0]["verdict"], "refute")
+            summary = reopened.review_coverage_summary(review_plan.review_plan_id)
+            self.assertTrue(summary["within_budget"])
+            self.assertEqual(summary["coverage"]["adoption"], "requires_explicit_user_decision")
+            trace = reopened.decision_trace("similar")
+            self.assertEqual(trace["review_plans"][0]["budget"], 1)
+
     def test_conflicting_revisions_compared_side_by_side_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             platform = MappingPlatform(directory)

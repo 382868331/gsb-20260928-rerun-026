@@ -275,6 +275,71 @@ class ProbePlan:
 
 
 @dataclass(frozen=True)
+class ReviewPlan:
+    review_plan_id: str
+    run_id: str
+    ambiguity_scope: str
+    budget: int
+    candidates: tuple[dict[str, Any], ...]
+    strategies: tuple[dict[str, Any], ...]
+    selected_strategy: str
+    selected_scan_ids: tuple[int, ...]
+    limitations: tuple[str, ...] = ()
+    feedback: tuple[dict[str, Any], ...] = ()
+    created_at: float = field(default_factory=time.time)
+    reason: str = ""
+
+    def with_feedback(self, feedback: tuple[dict[str, Any], ...]) -> "ReviewPlan":
+        return ReviewPlan(
+            self.review_plan_id,
+            self.run_id,
+            self.ambiguity_scope,
+            self.budget,
+            self.candidates,
+            self.strategies,
+            self.selected_strategy,
+            self.selected_scan_ids,
+            self.limitations,
+            feedback,
+            self.created_at,
+            self.reason,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "review_plan_id": self.review_plan_id,
+            "run_id": self.run_id,
+            "ambiguity_scope": self.ambiguity_scope,
+            "budget": self.budget,
+            "candidates": list(self.candidates),
+            "strategies": list(self.strategies),
+            "selected_strategy": self.selected_strategy,
+            "selected_scan_ids": list(self.selected_scan_ids),
+            "limitations": list(self.limitations),
+            "feedback": list(self.feedback),
+            "created_at": self.created_at,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ReviewPlan":
+        return cls(
+            review_plan_id=data["review_plan_id"],
+            run_id=data["run_id"],
+            ambiguity_scope=data["ambiguity_scope"],
+            budget=int(data["budget"]),
+            candidates=tuple(data.get("candidates", [])),
+            strategies=tuple(data.get("strategies", [])),
+            selected_strategy=data["selected_strategy"],
+            selected_scan_ids=tuple(int(item) for item in data.get("selected_scan_ids", [])),
+            limitations=tuple(data.get("limitations", [])),
+            feedback=tuple(data.get("feedback", [])),
+            created_at=float(data["created_at"]),
+            reason=data.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
 class CalibrationVersion:
     """A sensor calibration revision.
 

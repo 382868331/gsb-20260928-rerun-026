@@ -74,6 +74,14 @@ python -m robot_mapping.cli demo ./robot_map_project
 - 撤回某位评审者的修订（`withdraw_calibration`）会将其全部解释标记为 `withdrawn`、恢复依赖它的判断，另一评审者的待决解释不受影响；已撤回的版本不能再确认。
 - `decision_trace(run_id)` 的 `observation_provenance` 段逐条导出每条被修订观测的来源（修订版本、评审者、解释位置、状态），区分 `adopted`、`proposed`、`pending_conflict` 与 `withdrawn`；保存重开后待决观测与既有决定完整恢复，原始扫描文件逐字节不变。
 
+## 复核任务的证据覆盖规划
+
+尚未确认的解释需要人工复核时，调用 `plan_review_coverage(run_id, ambiguity_scope, review_budget, raw_indices=..., known_source_ids=...)`。系统把仍为 `proposed` 的解释视为候选，按原始扫描编号归并：同一条扫描上的多个解释共享一次复核机会，不会因为多个解释引用同一扫描而重复增加支持。
+
+计划同时比较两种预算内方案：`max_conflicts` 优先覆盖最多互斥候选冲突，`balanced_sources` 在冲突数相同的情况下优先覆盖更多来源并减少来源偏斜。返回结果逐扫描列出可区分的候选对、使用复核数、来源分布及是否完整覆盖；若某来源相关性未知（未列入 `known_source_ids`），计划会在 `limitations` 中明确保留限制，不把来源均衡当作独立性证明。
+
+实际复核通过 `record_review_feedback(...)` 记录为 `support`、`refute` 或 `insufficient`。反馈只挂到对应候选；证据不足不会被当成支持或反驳。即使某组互斥候选最终只剩一个未被反驳，系统也只标记为需要用户显式采用，不会自动确认校准解释、淘汰剩余解释或改动公共地图。采用仍必须调用 `confirm_calibration_interpretation` 或 `confirm_hypothesis`。`decision_trace(run_id)` 的 `review_plans` 段保存歧义范围、预算、候选共享扫描、两种计划、已选扫描、部分反馈和保存重开后的覆盖核对结果。
+
 ## 测试
 
 ```bash

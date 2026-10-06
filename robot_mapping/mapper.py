@@ -24,12 +24,21 @@ from .plans import (
     expected_vs_actual,
     predict_probe,
 )
+from .review_planning import (
+    INSUFFICIENT,
+    REFUTE,
+    SUPPORT,
+    ReviewCandidate,
+    feedback_coverage,
+    review_coverage_plan,
+)
 from .models import (
     CalibrationVersion,
     Hypothesis,
     LoopClosure,
     PoseRecord,
     ProbePlan,
+    ReviewPlan,
     Scan2D,
     new_id,
 )
@@ -46,6 +55,7 @@ class MappingRun:
     hypotheses: list[Hypothesis]
     probe_plans: list[ProbePlan]
     calibrations: list[CalibrationVersion]
+    review_plans: list[ReviewPlan]
 
 
 class MappingPlatform:
@@ -56,14 +66,14 @@ class MappingPlatform:
 
     def create_run(self, run_id: str) -> MappingRun:
         self.store.run_dir(run_id)
-        run = MappingRun(run_id, [], [], [], [], [], [])
+        run = MappingRun(run_id, [], [], [], [], [], [], [])
         self.runs[run_id] = run
         self._loaded.add(run_id)
         self.store.append_event({"type": "run_created", "run_id": run_id})
         return run
 
     def add_observation(self, run_id: str, pose: Pose, points: list[tuple[float, float]], sensor_id: str = "lidar_2d") -> None:
-        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], []))
+        run = self.runs.setdefault(run_id, MappingRun(run_id, [], [], [], [], [], [], []))
         self._loaded.add(run_id)
         index = len(run.scans)
         timestamp = float(index)
@@ -224,6 +234,132 @@ class MappingPlatform:
                 }
                 for target_index in plan.target_indices
             ],
+        }
+
+    def plan_review_coverage(
+        self,
+        run_id: str,
+        ambiguity_scope: str,
+        review_budget: int,
+        raw_indices: list[int] | None = None,
+        known_source_ids: list[str] | None = None,
+        reason: str = "",
+    ) -> ReviewPlan:
+        """Plan the minimum shared-scan reviews needed to separate pending readings.
+
+        Multiple interpretations of one raw scan share that observation: the
+        plan reviews the scan once. Planned feedback is prospective and does not
+        support a reading, adopt the sole survivor, or alter any map.
+        """
+
+        run = self._run(run_id)
+        if review_budget < 0:
+            raise ValueError("review_budget cannot be negative")
+        scope = None if raw_indices is None else {int(index) for index in raw_indices}
+        known_sources = set(known_source_ids or [])
+        candidates: list[ReviewCandidate] = []
+        for calibration in run.calibrations:
+            if calibration.status == "withdrawn":
+                continue
+            source_id = calibration.reviewer or calibration.calibration_id
+            for item in calibration.interpretations:
+                if item.get("status", PROPOSED) != PROPOSED:
+                    continue
+                raw_index = int(item["raw_index"])
+                if scope is not None and raw_index not in scope:
+                    continue
+                candidates.append(
+                    ReviewCandidate(
+                        candidate_id=f"{calibration.calibration_id}:{raw_index}",
+                        ambiguity_id=f"raw:{raw_index}",
+                        scan_id=raw_index,
+                        source_id=source_id,
+                        label=f"interpreted_index={int(item['interpreted_index'])}",
+                        source_relevance_known=source_id in known_sources,
+                    )
+                )
+        result = review_coverage_plan(candidates, review_budget)
+        recommended = next(item for item in result["plans"] if item["strategy"] == result["recommended_strategy"])
+        plan = ReviewPlan(
+            review_plan_id=new_id("review_plan"),
+            run_id=run_id,
+            ambiguity_scope=ambiguity_scope,
+            budget=review_budget,
+            candidates=tuple(candidate.to_dict() for candidate in candidates),
+            strategies=tuple(result["plans"]),
+            selected_strategy=str(result["recommended_strategy"]),
+            selected_scan_ids=tuple(int(item) for item in recommended["scan_ids"]),
+            limitations=tuple(str(item) for item in result["limitations"]),
+            reason=reason,
+        )
+        run.review_plans.append(plan)
+        self.store.record_review_plan(plan)
+        self.store.append_event(
+            {
+                "type": "review_coverage_plan_created",
+                "run_id": run_id,
+                "review_plan_id": plan.review_plan_id,
+                "ambiguity_scope": ambiguity_scope,
+                "raw_scope": sorted(scope) if scope is not None else [],
+                "budget": review_budget,
+                "selected_scan_ids": list(plan.selected_scan_ids),
+            }
+        )
+        return plan
+
+    def record_review_feedback(
+        self,
+        review_plan_id: str,
+        raw_index: int,
+        calibration_id: str,
+        verdict: str,
+        note: str = "",
+    ) -> dict[str, object]:
+        """Attach support/refute/insufficient feedback to one planned candidate only."""
+
+        if verdict not in (SUPPORT, REFUTE, INSUFFICIENT):
+            raise ValueError("review verdict must be support, refute or insufficient")
+        plan = self.review_plan(review_plan_id)
+        candidate_id = f"{calibration_id}:{int(raw_index)}"
+        candidate = next((item for item in plan.candidates if item["candidate_id"] == candidate_id), None)
+        if candidate is None:
+            raise KeyError(f"candidate {candidate_id} is not in review plan {review_plan_id}")
+        if int(raw_index) not in plan.selected_scan_ids:
+            raise ValueError(f"raw scan {raw_index} is outside the selected review budget")
+        run = self._run(plan.run_id)
+        feedback = [dict(item) for item in plan.feedback if item["candidate_id"] != candidate_id]
+        feedback.append(
+            {
+                "candidate_id": candidate_id,
+                "raw_index": int(raw_index),
+                "calibration_id": calibration_id,
+                "verdict": verdict,
+                "note": note,
+            }
+        )
+        updated_plan = plan.with_feedback(tuple(feedback))
+        run.review_plans = [
+            updated_plan if item.review_plan_id == updated_plan.review_plan_id else item
+            for item in run.review_plans
+        ]
+        self.store.record_review_plan(updated_plan)
+        candidates = [ReviewCandidate.from_dict(item) for item in updated_plan.candidates]
+        coverage = feedback_coverage(candidates, {item["candidate_id"]: item["verdict"] for item in feedback})
+        self.store.append_event(
+            {
+                "type": "review_feedback_recorded",
+                "run_id": plan.run_id,
+                "review_plan_id": review_plan_id,
+                "raw_index": int(raw_index),
+                "calibration_id": calibration_id,
+                "verdict": verdict,
+                "adoption": "requires_explicit_user_decision",
+            }
+        )
+        return {
+            "review_plan_id": review_plan_id,
+            "feedback": feedback,
+            "coverage": coverage,
         }
 
     def feed_observation_to_hypotheses(
@@ -877,6 +1013,35 @@ class MappingPlatform:
     def probe_plans_for(self, run_id: str) -> list[ProbePlan]:
         return list(self._run(run_id).probe_plans)
 
+    def review_plan(self, review_plan_id: str) -> ReviewPlan:
+        for run in self.runs.values():
+            for plan in run.review_plans:
+                if plan.review_plan_id == review_plan_id:
+                    return plan
+        for plan in self.store.load_review_plans():
+            if plan.review_plan_id == review_plan_id:
+                return plan
+        raise KeyError(f"unknown review plan: {review_plan_id}")
+
+    def review_plans_for(self, run_id: str) -> list[ReviewPlan]:
+        return list(self._run(run_id).review_plans)
+
+    def review_coverage_summary(self, review_plan_id: str) -> dict[str, object]:
+        plan = self.review_plan(review_plan_id)
+        candidates = [ReviewCandidate.from_dict(item) for item in plan.candidates]
+        feedback = {item["candidate_id"]: item["verdict"] for item in plan.feedback}
+        return {
+            "review_plan_id": review_plan_id,
+            "budget": plan.budget,
+            "selected_strategy": plan.selected_strategy,
+            "selected_scan_ids": list(plan.selected_scan_ids),
+            "reviews_used": len(plan.selected_scan_ids),
+            "within_budget": len(plan.selected_scan_ids) <= plan.budget,
+            "strategies": list(plan.strategies),
+            "limitations": list(plan.limitations),
+            "coverage": feedback_coverage(candidates, feedback),
+        }
+
     def decision_trace(self, run_id: str) -> dict[str, object]:
         """Replay plans, actual probes, exclusions, withdrawals and the final pick."""
 
@@ -893,6 +1058,20 @@ class MappingPlatform:
                     "executions": list(plan.executions),
                 }
                 for plan in run.probe_plans
+            ],
+            "review_plans": [
+                {
+                    "review_plan_id": plan.review_plan_id,
+                    "ambiguity_scope": plan.ambiguity_scope,
+                    "budget": plan.budget,
+                    "candidates": list(plan.candidates),
+                    "strategies": list(plan.strategies),
+                    "selected_strategy": plan.selected_strategy,
+                    "selected_scan_ids": list(plan.selected_scan_ids),
+                    "limitations": list(plan.limitations),
+                    "feedback": list(plan.feedback),
+                }
+                for plan in run.review_plans
             ],
             "hypotheses": [
                 {
@@ -1192,8 +1371,9 @@ class MappingPlatform:
             closures = [c for c in self.store.load_closures() if c.run_id == run_id]
             hypotheses = [h for h in self.store.load_hypotheses() if h.run_id == run_id]
             plans = [p for p in self.store.load_probe_plans() if p.run_id == run_id]
+            review_plans = [p for p in self.store.load_review_plans() if p.run_id == run_id]
             calibrations = self.store.load_calibrations()
             run_calibrations = [c for c in calibrations if c.run_id == run_id]
-            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, run_calibrations)
+            self.runs[run_id] = MappingRun(run_id, scans, poses, closures, hypotheses, plans, run_calibrations, review_plans)
             self._loaded.add(run_id)
         return self.runs[run_id]
